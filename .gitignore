@@ -30,3 +30,7 @@ venv/
 dist/
 build/
 coverage/
+
+# Pi-installed packages
+.pi/git/
+.pi/npm/
