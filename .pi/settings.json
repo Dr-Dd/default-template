@@ -1,5 +1,12 @@
 {
   "defaultProvider": "claude-code",
   "defaultModel": "claude-opus-5-5",
-  "defaultThinkingLevel": "medium"
+  "defaultThinkingLevel": "medium",
+  "packages": [
+    "https://github.com/earendil-works/pi-claude-code",
+    "npm:pi-subagents"
+  ],
+  "subagents": {
+    "disableBuiltins": true
+  }
 }
