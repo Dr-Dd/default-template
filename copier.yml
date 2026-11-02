@@ -1,0 +1,6 @@
+_exclude:
+  - copier.yml
+  - README.md
+  - .git
+  - .review/
+  - SPEC.md
