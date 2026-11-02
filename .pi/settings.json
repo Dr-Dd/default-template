@@ -1,0 +1,5 @@
+{
+  "defaultProvider": "claude-code",
+  "defaultModel": "claude-opus-5-5",
+  "defaultThinkingLevel": "medium"
+}
