@@ -1,5 +1,6 @@
 SPEC.md
 .review/
+TICKET.md
 
 # Secrets / env
 .env
@@ -31,6 +32,6 @@ dist/
 build/
 coverage/
 
-# Pi-installed packages
-.pi/git/
-.pi/npm/
+# Pi-installed packages (no trailing slash: tickets.sh symlinks them into worktrees)
+.pi/git
+.pi/npm
