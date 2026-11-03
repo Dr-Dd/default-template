@@ -6,7 +6,7 @@ restore: false
 ---
 This is a discussion, not a ticket. Do not follow the numbered workflow in AGENTS.md (Plan, Build, Review, Fix, Finish). In particular:
 - do not check that the working tree is clean
-- do not run tests, the type checker or the linter
+- do not run the check
 - do not run `reviewer` or consult `oracle`
 - do not regenerate .review/diff.patch or run `git add -N`
 
