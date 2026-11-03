@@ -4,3 +4,6 @@ _exclude:
   - .git
   - .review/
   - SPEC.md
+
+_skip_if_exists:
+  - check.sh
