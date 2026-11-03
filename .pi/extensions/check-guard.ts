@@ -73,8 +73,41 @@ async function targetPath(cwd: string, raw: string): Promise<string> {
 	}
 }
 
-function preview(text: string, max = 1500): string {
-	return text.length > max ? `${text.slice(0, max)}\n… (${text.length - max} more characters)` : text;
+function clip(line: string, max = 100): string {
+	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+/** Changed lines only (`-` removed, `+` added), at most `maxLines` of them, each clipped. */
+function diffLines(before: string, after: string, maxLines = 10): { removed: number; added: number; text: string } {
+	const a = before.split("\n");
+	const b = after.split("\n");
+	let start = 0;
+	while (start < a.length && start < b.length && a[start] === b[start]) start++;
+	let endA = a.length;
+	let endB = b.length;
+	while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+		endA--;
+		endB--;
+	}
+	const lines = [...a.slice(start, endA).map((l) => `- ${clip(l)}`), ...b.slice(start, endB).map((l) => `+ ${clip(l)}`)];
+	const shown = lines.slice(0, maxLines);
+	if (lines.length > maxLines) shown.push(`… ${lines.length - maxLines} more changed lines`);
+	return { removed: endA - start, added: endB - start, text: shown.join("\n") };
+}
+
+/** Short summary for the confirm dialog: counts in the title, a few changed lines in the body. */
+function summarizeEdit(edits: { oldText: string; newText: string }[]): { stats: string; text: string } {
+	let removed = 0;
+	let added = 0;
+	const parts: string[] = [];
+	for (const e of edits) {
+		const d = diffLines(e.oldText, e.newText, 6);
+		removed += d.removed;
+		added += d.added;
+		if (parts.length < 2) parts.push(d.text);
+	}
+	if (edits.length > 2) parts.push(`… ${edits.length - 2} more edits`);
+	return { stats: `${edits.length} edit${edits.length === 1 ? "" : "s"}, +${added}/−${removed} lines`, text: parts.join("\n\n") };
 }
 
 export default function (pi: ExtensionAPI) {
@@ -188,10 +221,18 @@ export default function (pi: ExtensionAPI) {
 			};
 			if (!ctx.hasUI) return denied;
 
-			const details = isToolCallEventType("write", event)
-				? `New content:\n${preview(event.input.content)}`
-				: event.input.edits.map((e) => `- ${preview(e.oldText, 600)}\n+ ${preview(e.newText, 600)}`).join("\n\n");
-			const ok = await ctx.ui.confirm(`Allow the agent to ${event.toolName} ${CHECK_FILE}?`, details);
+			let stats: string;
+			let details: string;
+			if (isToolCallEventType("write", event)) {
+				const current = await takeSnapshot(file);
+				const before = current.exists && current.mode !== -1 ? current.content.toString("utf8") : "";
+				const d = diffLines(before, event.input.content);
+				stats = `+${d.added}/−${d.removed} lines`;
+				details = d.text;
+			} else {
+				({ stats, text: details } = summarizeEdit(event.input.edits));
+			}
+			const ok = await ctx.ui.confirm(`Allow ${event.toolName} ${CHECK_FILE}? (${stats})`, details);
 			return ok ? undefined : denied;
 		}
 		return undefined;
@@ -209,10 +250,11 @@ export default function (pi: ExtensionAPI) {
 
 		if (ctx.hasUI) {
 			const what = !after.exists ? "deleted" : !before.exists ? "created" : "changed";
-			const shown = after.exists && after.mode !== -1 ? `\n\nNew content:\n${preview(after.content.toString("utf8"))}` : "";
+			const text = (s: Snapshot) => (s.exists && s.mode !== -1 ? s.content.toString("utf8") : "");
+			const d = diffLines(text(before), text(after));
 			const ok = await ctx.ui.confirm(
-				`The agent's bash command ${what} ${CHECK_FILE}. Keep the change?`,
-				`Command: ${preview(String(event.input.command), 500)}${shown}`,
+				`bash ${what} ${CHECK_FILE} (+${d.added}/−${d.removed} lines). Keep?`,
+				`${clip(String(event.input.command).replace(/\s+/g, " "), 100)}\n\n${d.text}`,
 			);
 			if (ok) return undefined;
 		}
