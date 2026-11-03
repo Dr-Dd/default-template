@@ -6,7 +6,7 @@ Lookups: For narrow searches ("where is X defined", "who calls Y") run one-shot 
 
 You are the only agent that edits files in this repo. Subagents read and advise; they never write.
 
-1. Plan: If the working tree is not clean, stop and tell me before planning. Run the `check` tool once before changing anything; if it fails, stop and tell me, with its output. Read the relevant code and write SPEC.md (what changes, files touched, how we know it works). Stop and wait for my approval.
+1. Plan: If the working tree is not clean, or SPEC.md or .review/ exists, stop and tell me before planning. Run the `check` tool once before changing anything; if it fails, stop and tell me, with its output. Read the relevant code and write SPEC.md (what changes, files touched, how we know it works). Stop and wait for my approval.
 2. Build: implement SPEC.md. The change is done when the `check` tool passes.
 3. Review: when the check passes, run one `reviewer` subagent with fresh context. 
   - Prepare: Run `git add -N` on every new file you created (so it shows up in the diff), then `mkdir -p .review && git diff HEAD > .review/diff.patch`. Overwrite this file every round.
