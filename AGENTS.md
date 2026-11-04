@@ -13,6 +13,6 @@ You are the only agent that edits files in this repo. Subagents read and advise;
   - Prepare: Run `git add -N` on every new file you created (so it shows up in the diff), then `mkdir -p .review && git diff HEAD > .review/diff.patch`. Overwrite this file every round.
   - The reviewer already knows how to review and how to report. Its task is: "Review the change. Spec: SPEC.md. Patch: .review/diff.patch." Add only context the spec does not make obvious. Do not paste the diff into the task.
 4. Fix: apply P0 and P1 findings yourself, re-run the check, review again with a new fresh reviewer. Max 3 review rounds, then stop and report what is left.
-5. Finish: summarize changed files, validation, and remaining notes. Do not merge. If I ask you to commit, delete SPEC.md and .review/ afterwards.
+5. Finish: summarize changed files, validation, and remaining notes. Do not merge. If I ask you to commit: write the message to .review/commit-msg (a short descriptive subject line, a blank line, then SPEC.md verbatim, updated first if the implementation drifted from it), and run `git commit -F .review/commit-msg --cleanup=verbatim`. Only if the commit succeeds, delete SPEC.md and .review/.
 
 Never change the model mid-ticket. If pi stops you because the check keeps failing, stop and tell me unless the ticket template says otherwise; I may raise the thinking level before you continue.
