@@ -6,8 +6,9 @@
 # Delete steps that do not apply, or add others (build, format check, ...).
 # Until then the check fails on purpose.
 #
-# In pi, the agent runs this through the `check` tool and needs your approval
-# to change this file (see .pi/extensions/check-guard.ts).
+# In pi and ECA, the agent runs this through the `check` tool and needs your
+# approval to change this file (see .pi/extensions/check-guard.ts and
+# .eca/hooks/check-guard.sh).
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1

@@ -1,0 +1,99 @@
+{
+  "$schema": "https://eca.dev/config.json",
+  "defaultModel": "anthropic/claude-opus-5-5",
+  "agent": {
+    "code": { "variant": "medium" },
+    "explorer": { "defaultModel": "anthropic/claude-haiku-5-5" },
+    "general": { "spawnableBy": "none" },
+    "advised": {
+      "inherit": "code",
+      "mode": "primary",
+      "description": "Ticket on Sonnet, with an Opus oracle at fixed points",
+      "defaultModel": "anthropic/claude-sonnet-5-5",
+      "variant": "medium"
+    },
+    "discuss": {
+      "inherit": "code",
+      "mode": "primary",
+      "description": "Talk through choices for the current ticket; edits SPEC.md only when asked",
+      "defaultModel": "anthropic/claude-opus-5-5",
+      "variant": "high",
+      "disabledTools": ["preview_file_change", "move_file", "check"],
+      "toolCall": {
+        "approval": {
+          "deny": {
+            "eca__write_file": { "argsMatchers": { "path": ["(?!(.*/)?SPEC\\.md$).*"] } },
+            "eca__edit_file": { "argsMatchers": { "path": ["(?!(.*/)?SPEC\\.md$).*"] } },
+            "eca__git": {
+              "argsMatchers": {
+                "command": [".*\\bgit\\s+(add|commit|push|reset|restore|checkout|switch|stash|rebase|merge|rm|mv|apply|clean)\\b.*"]
+              }
+            },
+            "eca__shell_command": {
+              "argsMatchers": {
+                "command": [
+                  ".*[12&]?>>?\\s*(?!/dev/null\\b)(?!/tmp/\\S*\\b)(?!&\\d+\\b)(?!>)\\S+.*",
+                  ".*\\|\\s*(tee|dd|xargs).*",
+                  ".*\\b(sed|awk|perl)\\s+.*-i.*",
+                  ".*\\b(rm|mv|cp|touch|mkdir)\\b.*",
+                  ".*git\\s+(add|commit|push|reset|restore|checkout|switch|stash|apply|clean).*",
+                  ".*\\bcheck\\.sh\\b.*"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "customTools": {
+    "check": {
+      "description": "Run the project check (./check.sh: tests, type checks, linters and whatever else the project configured). Fails with the output of every failing step. A change is done only when this tool passes. Never run check.sh through the shell.",
+      "command": "bash ./check.sh",
+      "schema": { "properties": {}, "required": [] }
+    }
+  },
+  "toolCall": {
+    "approval": {
+      "allow": { "eca__check": {} }
+    }
+  },
+  "hooks": {
+    "check-guard-file-edits": {
+      "type": "preToolCall",
+      "description": "Changing check.sh always asks the user, even in trust mode",
+      "matcher": "eca__(edit_file|write_file|move_file)",
+      "visible": false,
+      "actions": [{ "type": "shell", "shell": "bash .eca/hooks/check-guard.sh file-approval" }]
+    },
+    "check-guard-shell-pre": {
+      "type": "preToolCall",
+      "description": "Reject running check.sh through the shell; snapshot check.sh",
+      "matcher": "eca__(shell_command|git)",
+      "visible": false,
+      "actions": [{ "type": "shell", "shell": "bash .eca/hooks/check-guard.sh shell-pre" }]
+    },
+    "check-guard-shell-post": {
+      "type": "postToolCall",
+      "description": "Revert changes to check.sh made through the shell",
+      "matcher": "eca__(shell_command|git)",
+      "runOnError": true,
+      "visible": false,
+      "actions": [{ "type": "shell", "shell": "bash .eca/hooks/check-guard.sh shell-post" }]
+    },
+    "check-guard-failures": {
+      "type": "postToolCall",
+      "description": "Stop the turn after ECA_CHECK_MAX_FAILURES (default 3) consecutive failing checks",
+      "matcher": "eca__check",
+      "runOnError": true,
+      "visible": false,
+      "actions": [{ "type": "shell", "shell": "bash .eca/hooks/check-guard.sh check-post" }]
+    },
+    "check-guard-reset": {
+      "type": "preRequest",
+      "description": "A new user message resets the check failure count",
+      "visible": false,
+      "actions": [{ "type": "shell", "shell": "bash .eca/hooks/check-guard.sh reset" }]
+    }
+  }
+}

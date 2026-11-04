@@ -11,6 +11,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `tickets.sh` and `.pi/extensions/ticket-status.ts`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
 - `.pi/prompts/`: the `/solo` (Opus alone) and `/advised` (Sonnet with an Opus `oracle` advisor) ticket commands, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
+- `.eca/`: the same workflow for ECA (see [ECA](#eca))
 
 ## Usage
 
@@ -21,6 +22,32 @@ copier copy --vcs-ref main git@github.com:Dr-Dd/default-template.git .
 ```
 
 Pi only applies `.pi/settings.json` once you trust the project. Other settings still come from `~/.pi/agent/`.
+
+## ECA
+
+The same workflow also runs in [ECA](https://eca.dev) (Editor Code Assistant), configured in `.eca/`. Both tools read the same `AGENTS.md`; `.eca/rules/workflow.md` maps its pi terms to ECA. Log in once with `/login anthropic` and choose `max` to use a Claude Pro/Max subscription.
+
+Pick the ticket mode by choosing the **agent** before the first message (in Emacs: `C-c C-b` cycles, `C-c C-S-b` selects). ECA keeps a chat's model once it has started, so start a new chat to switch mode.
+
+| pi | ECA | Model |
+|---|---|---|
+| `/solo <ticket>` | `code` agent (the default), then type the ticket | Opus, medium |
+| `/advised <ticket>` | `advised` agent | Sonnet, medium; `oracle` subagent on Opus |
+| `/discuss <topic>` | `discuss` agent | Opus, high; can write only SPEC.md |
+| `/fanout <request>` | `/fanout <request>` command | launches pi tickets with `tickets.sh` |
+| `scout` subagent | built-in `explorer` subagent | Haiku |
+| `reviewer` subagent | `reviewer` subagent | Opus, high |
+
+The check is the `check` tool (`.eca/config.json` `customTools`). `.eca/hooks/check-guard.sh` (needs `jq`) adds the guards from pi's `check-guard.ts`:
+
+- edits to `check.sh` through the file tools always ask you, even in trust mode;
+- running `check.sh` through the shell is rejected;
+- a shell or git command that changes `check.sh` is reverted, since an ECA hook cannot ask you mid-command;
+- after 3 consecutive failing checks the turn stops (`ECA_CHECK_MAX_FAILURES` in ECA's environment changes the limit); your next message resets the count.
+
+ECA's built-in `general` subagent can edit files, so it is hidden from every agent (`spawnableBy: "none"`, like `disableBuiltins` in pi).
+
+Differences from pi: ECA subagents always start from an empty conversation, so the `oracle` gets its context from the task the agent writes, not from a fork. ECA also gives subagents the project's `AGENTS.md` and any rules without an agent filter, so the `reviewer` is fresh with respect to the conversation but not to the project instructions. Parallel tickets (`tickets.sh`, tmux window status) stay pi-only.
 
 ## Parallel tickets
 
