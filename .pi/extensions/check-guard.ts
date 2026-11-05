@@ -7,6 +7,8 @@
  *   agent is stopped until the user sends a new message.
  * - Changing check.sh needs the user's approval: write/edit ask first; changes
  *   made through bash are detected afterwards and reverted unless approved.
+ *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles
+ *   the whole file). PI_CHECK_DIFF_CONTEXT sets the context lines (default 4).
  */
 
 import { lstat, readFile, realpath, rm, writeFile, chmod } from "node:fs/promises";
@@ -17,9 +19,12 @@ import {
 	DEFAULT_MAX_LINES,
 	type ExtensionAPI,
 	type ExtensionContext,
+	generateDiffString,
 	isToolCallEventType,
+	renderDiff,
 	truncateTail,
 } from "@earendil-works/pi-coding-agent";
+import { matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
 const CHECK_FILE = "check.sh";
@@ -73,41 +78,150 @@ async function targetPath(cwd: string, raw: string): Promise<string> {
 	}
 }
 
-function clip(line: string, max = 100): string {
-	return line.length > max ? `${line.slice(0, max - 1)}…` : line;
-}
-
-/** Changed lines only (`-` removed, `+` added), at most `maxLines` of them, each clipped. */
-function diffLines(before: string, after: string, maxLines = 10): { removed: number; added: number; text: string } {
-	const a = before.split("\n");
-	const b = after.split("\n");
-	let start = 0;
-	while (start < a.length && start < b.length && a[start] === b[start]) start++;
-	let endA = a.length;
-	let endB = b.length;
-	while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-		endA--;
-		endB--;
-	}
-	const lines = [...a.slice(start, endA).map((l) => `- ${clip(l)}`), ...b.slice(start, endB).map((l) => `+ ${clip(l)}`)];
-	const shown = lines.slice(0, maxLines);
-	if (lines.length > maxLines) shown.push(`… ${lines.length - maxLines} more changed lines`);
-	return { removed: endA - start, added: endB - start, text: shown.join("\n") };
-}
-
-/** Short summary for the confirm dialog: counts in the title, a few changed lines in the body. */
-function summarizeEdit(edits: { oldText: string; newText: string }[]): { stats: string; text: string } {
+/** Added/removed line counts from a real line diff. */
+function countChanges(before: string, after: string): { removed: number; added: number } {
 	let removed = 0;
 	let added = 0;
-	const parts: string[] = [];
-	for (const e of edits) {
-		const d = diffLines(e.oldText, e.newText, 6);
-		removed += d.removed;
-		added += d.added;
-		if (parts.length < 2) parts.push(d.text);
+	for (const line of generateDiffString(before, after, 0).diff.split("\n")) {
+		if (line.startsWith("-")) removed++;
+		else if (line.startsWith("+")) added++;
 	}
-	if (edits.length > 2) parts.push(`… ${edits.length - 2} more edits`);
-	return { stats: `${edits.length} edit${edits.length === 1 ? "" : "s"}, +${added}/−${removed} lines`, text: parts.join("\n\n") };
+	return { removed, added };
+}
+
+/** check.sh after applying `edits`, or undefined if an oldText does not match exactly once. */
+function applyEdits(content: string, edits: { oldText: string; newText: string }[]): string | undefined {
+	let out = content.replace(/\r\n/g, "\n");
+	for (const e of edits) {
+		const oldText = e.oldText.replace(/\r\n/g, "\n");
+		const at = out.indexOf(oldText);
+		if (at === -1 || out.indexOf(oldText, at + 1) !== -1) return undefined;
+		out = out.slice(0, at) + e.newText.replace(/\r\n/g, "\n") + out.slice(at + oldText.length);
+	}
+	return out;
+}
+
+/** Context lines around each change in the review dialog; `c` toggles the whole file. */
+function diffContext(): number {
+	const n = Number(process.env.PI_CHECK_DIFF_CONTEXT);
+	return Number.isInteger(n) && n >= 0 ? n : 4;
+}
+
+type Review = {
+	title: string;
+	/** Extra lines shown above the diff (e.g. the bash command). */
+	header?: string;
+	before: string;
+	after: string;
+	/** Used instead of before/after when the edit cannot be applied to the current file. */
+	rawDiff?: string;
+};
+
+function buildDiff(r: Review, context: number): string {
+	if (r.rawDiff !== undefined) return r.rawDiff;
+	return generateDiffString(r.before, r.after, context).diff || "(no textual change)";
+}
+
+/**
+ * Ask the user to approve a change to check.sh, showing the full diff.
+ * TUI: full-screen scrollable overlay; `y`/`n` pick an answer and Enter confirms it
+ * (Esc does not deny, so a stray keypress cannot answer). RPC: confirm with the full diff.
+ */
+async function reviewChange(ctx: ExtensionContext, r: Review): Promise<boolean> {
+	if (ctx.mode !== "tui") {
+		const body = [r.header, buildDiff(r, diffContext())].filter(Boolean).join("\n\n");
+		return ctx.ui.confirm(r.title, body);
+	}
+
+	return ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
+		let full = false;
+		let top = 0;
+		let choice: boolean | undefined;
+		let lines: string[] | undefined;
+		let linesWidth = -1;
+
+		// Title, rule, rule, choice line, help line.
+		const CHROME = 5;
+		const viewHeight = () => Math.max(1, tui.terminal.rows - CHROME);
+		const content = (width: number): string[] => {
+			if (lines && linesWidth === width) return lines;
+			const header = r.header ? r.header.split("\n").flatMap((l) => wrapTextWithAnsi(theme.fg("muted", l), width)) : [];
+			const diff = renderDiff(buildDiff(r, full ? Number.MAX_SAFE_INTEGER : diffContext()))
+				.split("\n")
+				.flatMap((l) => wrapTextWithAnsi(l, width));
+			lines = header.length ? [...header, "", ...diff] : diff;
+			linesWidth = width;
+			return lines;
+		};
+		const scroll = (delta: number) => {
+			const max = Math.max(0, (lines?.length ?? 0) - viewHeight());
+			top = Math.min(max, Math.max(0, top + delta));
+			tui.requestRender();
+		};
+
+		return {
+			// Fullscreen mode: receive PgUp/PgDn/Home/End instead of the transcript scrolling.
+			capturesViewportInput: true,
+			// Fullscreen mode: mouse wheel / touchpad scrolls the diff, not the transcript.
+			handleMouse(event) {
+				if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+				scroll(event.wheelDelta);
+				return { handled: true };
+			},
+			render(width: number): string[] {
+				const all = content(width);
+				const h = viewHeight();
+				top = Math.min(top, Math.max(0, all.length - h));
+				const shown = all.slice(top, top + h);
+				// Fill the screen so the chat behind the overlay is hidden.
+				while (shown.length < h) shown.push("");
+				const pos = all.length > h ? `[${top + 1}-${top + Math.min(h, all.length - top)}/${all.length}] ` : "";
+				const opt = (label: string, value: boolean, color: "success" | "error") =>
+					choice === value ? theme.fg(color, theme.bold(`▶ ${label}`)) : theme.fg("dim", `  ${label}`);
+				const status =
+					choice === undefined
+						? theme.fg("warning", "press y or n, then Enter")
+						: theme.fg("accent", `Enter to ${choice ? "allow" : "deny"}`);
+				const help =
+					`${pos}y allow · n deny · enter confirm · ↑↓/pgup/pgdn/home/end/wheel scroll · ` +
+					`c ${full ? "changes only" : "whole file"}`;
+				return [
+					truncateToWidth(theme.fg("warning", theme.bold(r.title)), width),
+					theme.fg("dim", "─".repeat(width)),
+					...shown,
+					theme.fg("dim", "─".repeat(width)),
+					truncateToWidth(`${opt("Allow (y)", true, "success")}   ${opt("Deny (n)", false, "error")}   ${status}`, width),
+					truncateToWidth(theme.fg("dim", help), width),
+				];
+			},
+			handleInput(data: string): void {
+				if (data === "y" || data === "Y" || data === "n" || data === "N") {
+					choice = data === "y" || data === "Y";
+					return tui.requestRender();
+				}
+				// Only Enter answers, and only once y or n was picked. Esc/Ctrl+C are ignored.
+				if (keybindings.matches(data, "tui.select.confirm")) {
+					if (choice !== undefined) done(choice);
+					return;
+				}
+				if (data === "c" || data === "C") {
+					full = !full;
+					lines = undefined;
+					top = 0;
+					return tui.requestRender();
+				}
+				if (keybindings.matches(data, "tui.select.up") || data === "k") return scroll(-1);
+				if (keybindings.matches(data, "tui.select.down") || data === "j") return scroll(1);
+				if (keybindings.matches(data, "tui.select.pageUp")) return scroll(-viewHeight());
+				if (keybindings.matches(data, "tui.select.pageDown") || data === " ") return scroll(viewHeight());
+				if (matchesKey(data, "home") || data === "g") return scroll(-Infinity);
+				if (matchesKey(data, "end") || data === "G") return scroll(Infinity);
+			},
+			invalidate() {
+				lines = undefined;
+			},
+		};
+	}, { overlay: true, overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: 0 } });
 }
 
 export default function (pi: ExtensionAPI) {
@@ -221,18 +335,36 @@ export default function (pi: ExtensionAPI) {
 			};
 			if (!ctx.hasUI) return denied;
 
-			let stats: string;
-			let details: string;
+			const current = await takeSnapshot(file);
+			const before = current.exists && current.mode !== -1 ? current.content.toString("utf8") : "";
+			let review: Review;
 			if (isToolCallEventType("write", event)) {
-				const current = await takeSnapshot(file);
-				const before = current.exists && current.mode !== -1 ? current.content.toString("utf8") : "";
-				const d = diffLines(before, event.input.content);
-				stats = `+${d.added}/−${d.removed} lines`;
-				details = d.text;
+				const d = countChanges(before, event.input.content);
+				review = {
+					title: `Allow write ${CHECK_FILE}? (+${d.added}/−${d.removed} lines)`,
+					before,
+					after: event.input.content,
+				};
 			} else {
-				({ stats, text: details } = summarizeEdit(event.input.edits));
+				const edits = event.input.edits;
+				const after = applyEdits(before, edits);
+				const n = `${edits.length} edit${edits.length === 1 ? "" : "s"}`;
+				if (after !== undefined) {
+					const d = countChanges(before.replace(/\r\n/g, "\n"), after);
+					review = {
+						title: `Allow edit ${CHECK_FILE}? (${n}, +${d.added}/−${d.removed} lines)`,
+						before: before.replace(/\r\n/g, "\n"),
+						after,
+					};
+				} else {
+					// oldText does not match exactly: show each replacement on its own (the edit tool may still fuzzy-match).
+					const rawDiff = edits
+						.map((e, i) => `Edit ${i + 1}/${edits.length}\n${generateDiffString(e.oldText, e.newText, 2).diff}`)
+						.join("\n\n");
+					review = { title: `Allow edit ${CHECK_FILE}? (${n})`, before: "", after: "", rawDiff };
+				}
 			}
-			const ok = await ctx.ui.confirm(`Allow ${event.toolName} ${CHECK_FILE}? (${stats})`, details);
+			const ok = await reviewChange(ctx, review);
 			return ok ? undefined : denied;
 		}
 		return undefined;
@@ -251,11 +383,13 @@ export default function (pi: ExtensionAPI) {
 		if (ctx.hasUI) {
 			const what = !after.exists ? "deleted" : !before.exists ? "created" : "changed";
 			const text = (s: Snapshot) => (s.exists && s.mode !== -1 ? s.content.toString("utf8") : "");
-			const d = diffLines(text(before), text(after));
-			const ok = await ctx.ui.confirm(
-				`bash ${what} ${CHECK_FILE} (+${d.added}/−${d.removed} lines). Keep?`,
-				`${clip(String(event.input.command).replace(/\s+/g, " "), 100)}\n\n${d.text}`,
-			);
+			const d = countChanges(text(before), text(after));
+			const ok = await reviewChange(ctx, {
+				title: `bash ${what} ${CHECK_FILE} (+${d.added}/−${d.removed} lines). Keep?`,
+				header: `$ ${String(event.input.command)}`,
+				before: text(before),
+				after: text(after),
+			});
 			if (ok) return undefined;
 		}
 
