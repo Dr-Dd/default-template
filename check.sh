@@ -7,7 +7,7 @@
 # Until then the check fails on purpose.
 #
 # In pi, the agent runs this through the `check` tool and needs your approval
-# to change this file (see .pi/extensions/check-guard.ts).
+# to change this file (see .pi/extensions/check-guard/).
 
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1

@@ -109,11 +109,15 @@ open_window() {
 	fi
 }
 
+# Gitignored installs under .pi/ that worktrees share with the main checkout through symlinks.
+pi_installs=(npm git check-guard/node_modules)
+
 # Share pi's installed project packages with the worktree instead of reinstalling them.
 link_pi_packages() {
 	local dir=$1 sub
-	for sub in npm git; do
-		if [[ -d "$main_root/.pi/$sub" && ! -e "$dir/.pi/$sub" ]]; then
+	for sub in "${pi_installs[@]}"; do
+		if [[ -d "$main_root/.pi/$sub" && ! -e "$dir/.pi/$sub" && ! -L "$dir/.pi/$sub" ]]; then
+			mkdir -p "$(dirname "$dir/.pi/$sub")"
 			ln -s "$main_root/.pi/$sub" "$dir/.pi/$sub"
 		fi
 	done
@@ -213,8 +217,9 @@ cmd_remove() {
 		[[ -z $(git -C "$dir" status --porcelain) ]] ||
 			die "worktree $dir has uncommitted changes; commit or discard them first"
 		local sub
-		for sub in npm git; do
-			[[ -L "$dir/.pi/$sub" ]] && rm "$dir/.pi/$sub"
+		for sub in "${pi_installs[@]}"; do
+			# rm on a symlink removes only the link, never the shared install.
+			if [[ -L "$dir/.pi/$sub" ]]; then rm "$dir/.pi/$sub"; fi
 		done
 		rm -f "$dir/TICKET.md"
 		git -C "$main_root" worktree remove "$dir"

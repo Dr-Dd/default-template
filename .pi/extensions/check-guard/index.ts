@@ -5,14 +5,23 @@
  * - Running check.sh through bash is blocked, so the exit code cannot be hidden.
  * - After PI_CHECK_MAX_FAILURES (default 3) failing `check` runs in a row, the
  *   agent is stopped until the user sends a new message.
- * - Changing or deleting an existing guarded file (GUARDED_FILES globs, by default
- *   just check.sh) needs the user's approval: write/edit ask first; changes made
- *   through bash are detected afterwards and reverted unless approved. Creating a
- *   guarded file that does not exist yet is always allowed.
+ * - Protected files are configured in .pi/check-guard.json (read at session start and on each
+ *   user message; see the README):
+ *   - `guardedFiles`: changing or deleting an existing file needs the user's approval. Creating
+ *     one that does not exist yet is allowed. check-guard.json itself is always guarded.
+ *   - `unitGuardedFiles`: only changes to code that exists in the base commit (HEAD when the
+ *     session started or the user last sent a message) need approval: modifying, removing or
+ *     renaming a function/test/class/statement from that commit, or adding code that changes how
+ *     existing tests run (focused tests, new hooks in existing suites, mocks, ...). New code is
+ *     free. Files are parsed with tree-sitter (see units.ts; install with .pi/check-guard/setup.sh).
+ *     If parsing is unavailable they are guarded like `guardedFiles`.
+ *   write/edit ask first; changes made through bash are detected afterwards and the whole file is
+ *   reverted unless approved.
  *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles
  *   the whole file). PI_CHECK_DIFF_CONTEXT sets the context lines (default 4).
  */
 
+import { execFile } from "node:child_process";
 import { chmod, glob, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";
@@ -28,16 +37,20 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { compare, type Extracted, type Issue, PRESETS, type Preset, parserFor } from "./units.ts";
 
 /** The project check script run by the `check` tool. */
 const CHECK_FILE = "check.sh";
-/**
- * Files (globs relative to the project root) that need the user's approval to change or delete.
- * Globs match files only: use `dir/**` to guard every file inside a directory.
- */
-const GUARDED_FILES: readonly string[] = ["check.sh"];
+/** Per-project configuration (relative to the project root). Always guarded as a whole file. */
+const CONFIG_FILE = ".pi/check-guard.json";
+/** guardedFiles when there is no config file. */
+const DEFAULT_GUARDED: readonly string[] = ["check.sh"];
+/** Always guarded as whole files: the guard's own configuration and code. */
+const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**", ".pi/check-guard/**"];
+/** Guarded files whose creation also needs approval (a new config could drop guards). */
+const GUARD_CREATION: readonly string[] = [CONFIG_FILE];
 /** Directories never searched for guarded files. */
-const GLOB_SKIP_DIRS = new Set([".git", "node_modules"]);
+const GLOB_SKIP_DIRS = new Set([".git", "node_modules", ".venv", "venv", ".tox", "__pycache__"]);
 const DEFAULT_MAX_FAILURES = 3;
 
 /** check.sh invoked as a command: `./check.sh`, `bash check.sh`, `sh -c './check.sh'`, `source check.sh`, ... */
@@ -151,18 +164,92 @@ function relPath(cwd: string, abs: string): string | undefined {
 	return rel.split(sep).join("/");
 }
 
-function isGuardedRel(rel: string | undefined): rel is string {
-	return rel !== undefined && GUARDED_FILES.some((g) => matchesGlob(rel, g));
+/** How a file is protected: as a whole, or per unit of code from the base commit. */
+type Rule = { kind: "file" } | { kind: "units"; preset: Preset; grammar?: string };
+
+type Config = {
+	guarded: string[];
+	units: { files: string[]; preset: Preset; grammar?: string }[];
+	/** Problems found while reading the config (shown to the user). */
+	errors: string[];
+};
+
+const WHOLE_FILE: Rule = { kind: "file" };
+
+function ruleFor(cfg: Config, rel: string | undefined): Rule | undefined {
+	if (rel === undefined) return undefined;
+	if ([...ALWAYS_GUARDED, ...cfg.guarded].some((g) => matchesGlob(rel, g))) return WHOLE_FILE;
+	const u = cfg.units.find((e) => e.files.some((g) => matchesGlob(rel, g)));
+	return u && { kind: "units", preset: u.preset, grammar: u.grammar };
+}
+
+const isGuardedRel = (cfg: Config, rel: string | undefined): rel is string => ruleFor(cfg, rel) !== undefined;
+
+/**
+ * Read CONFIG_FILE. Problems never weaken protection: an invalid unit entry guards its files as
+ * whole files, and an unreadable config keeps the default guardedFiles.
+ */
+async function loadConfig(cwd: string): Promise<Config> {
+	const cfg: Config = { guarded: [...DEFAULT_GUARDED], units: [], errors: [] };
+	let raw: string;
+	try {
+		raw = await readFile(resolve(cwd, CONFIG_FILE), "utf8");
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") cfg.errors.push(`cannot read ${CONFIG_FILE}: ${String(err)}`);
+		return cfg;
+	}
+	let json: unknown;
+	try {
+		json = JSON.parse(raw);
+	} catch (err) {
+		cfg.errors.push(`${CONFIG_FILE} is not valid JSON (${err instanceof Error ? err.message : String(err)})`);
+		return cfg;
+	}
+	const strings = (v: unknown): string[] | undefined =>
+		typeof v === "string" ? [v] : Array.isArray(v) && v.every((s) => typeof s === "string") ? v : undefined;
+	const obj = (json ?? {}) as Record<string, unknown>;
+	if (obj.guardedFiles !== undefined) {
+		const g = strings(obj.guardedFiles);
+		if (g) cfg.guarded = g;
+		else cfg.errors.push(`${CONFIG_FILE}: guardedFiles must be a list of globs`);
+	}
+	const entries = obj.unitGuardedFiles ?? [];
+	if (!Array.isArray(entries)) {
+		cfg.errors.push(`${CONFIG_FILE}: unitGuardedFiles must be a list`);
+		return cfg;
+	}
+	for (const [i, e] of entries.entries()) {
+		const entry = (e ?? {}) as Record<string, unknown>;
+		const files = strings(entry.files);
+		const preset = typeof entry.preset === "string" ? PRESETS[entry.preset] : undefined;
+		const grammar = typeof entry.grammar === "string" ? entry.grammar : undefined;
+		if (!files) {
+			cfg.errors.push(`${CONFIG_FILE}: unitGuardedFiles[${i}] needs "files"`);
+			continue;
+		}
+		if (!preset || (entry.preset === "generic" && !grammar)) {
+			cfg.errors.push(
+				`${CONFIG_FILE}: unitGuardedFiles[${i}] has no valid "preset"` +
+					`${entry.preset === "generic" ? ' ("generic" needs "grammar")' : ` (one of ${Object.keys(PRESETS).join(", ")})`}; ` +
+					"its files are guarded as whole files",
+			);
+			cfg.guarded.push(...files);
+			continue;
+		}
+		cfg.units.push({ files, preset, grammar });
+	}
+	return cfg;
 }
 
 /**
  * Guarded files that currently exist, relative to cwd. Directories are skipped: a glob guards
  * files (use `dir/**` for everything inside a directory), and a directory cannot be restored.
  */
-async function guardedFiles(cwd: string): Promise<string[]> {
+async function guardedFiles(cwd: string, cfg: Config): Promise<string[]> {
 	const found = new Set<string>();
 	const exclude = (p: string) => p.split(/[\\/]/).some((part) => GLOB_SKIP_DIRS.has(part));
-	for await (const rel of glob([...GUARDED_FILES], { cwd, exclude })) {
+	const patterns = [...ALWAYS_GUARDED, ...cfg.guarded, ...cfg.units.flatMap((u) => u.files)];
+	for await (const rel of glob(patterns, { cwd, exclude })) {
 		const st = await lstat(resolve(cwd, rel)).catch(() => undefined);
 		if (st && !st.isDirectory()) found.add(rel.split(sep).join("/"));
 	}
@@ -196,9 +283,9 @@ async function realOrSelf(abs: string): Promise<string> {
  */
 type Aliases = Map<string, string>;
 
-async function findAliases(cwd: string): Promise<Aliases> {
+async function findAliases(cwd: string, cfg: Config): Promise<Aliases> {
 	const aliases: Aliases = new Map();
-	for (const rel of await guardedFiles(cwd)) {
+	for (const rel of await guardedFiles(cwd, cfg)) {
 		const abs = resolve(cwd, rel);
 		const real = await realOrSelf(abs);
 		if (real !== abs && !aliases.has(real)) aliases.set(real, rel);
@@ -213,6 +300,7 @@ async function findAliases(cwd: string): Promise<Aliases> {
  */
 async function guardedTarget(
 	cwd: string,
+	cfg: Config,
 	raw: string,
 	aliases: () => Promise<Aliases>,
 ): Promise<string | undefined> {
@@ -222,7 +310,7 @@ async function guardedTarget(
 	const real = await realOrSelf(abs);
 	for (const candidate of [abs, real]) {
 		const rel = relPath(cwd, candidate);
-		if (isGuardedRel(rel)) return rel;
+		if (isGuardedRel(cfg, rel)) return rel;
 	}
 	// A target that does not exist cannot be the resolved path of an existing guarded file.
 	try {
@@ -233,18 +321,53 @@ async function guardedTarget(
 	return (await aliases()).get(real);
 }
 
-/** Snapshots of every guarded file that exists now. */
-async function snapshotGuarded(cwd: string): Promise<Map<string, Snapshot>> {
+/** Snapshots of every guarded file that exists now; files whose lstat matches `before` are reused without being read. */
+async function resnapshotGuarded(
+	cwd: string,
+	cfg: Config,
+	before: Map<string, Snapshot>,
+): Promise<Map<string, Snapshot>> {
 	const snaps = new Map<string, Snapshot>();
-	for (const rel of await guardedFiles(cwd)) snaps.set(rel, await takeSnapshot(resolve(cwd, rel)));
+	for (const rel of await guardedFiles(cwd, cfg)) snaps.set(rel, await resnapshot(resolve(cwd, rel), before.get(rel)));
 	return snaps;
 }
 
-/** Like snapshotGuarded, but files whose lstat matches `before` are reused without being read. */
-async function resnapshotGuarded(cwd: string, before: Map<string, Snapshot>): Promise<Map<string, Snapshot>> {
-	const snaps = new Map<string, Snapshot>();
-	for (const rel of await guardedFiles(cwd)) snaps.set(rel, await resnapshot(resolve(cwd, rel), before.get(rel)));
-	return snaps;
+/** Output of a git command, or undefined if it fails. */
+function git(cwd: string, args: string[]): Promise<string | undefined> {
+	return new Promise((done) => {
+		execFile("git", args, { cwd, maxBuffer: 256 * 1024 * 1024, encoding: "utf8" }, (err, stdout) =>
+			done(err ? undefined : stdout),
+		);
+	});
+}
+
+/** The base commit: HEAD, null if the repository has no commits yet, or an error message. */
+type Base = { sha: string | null } | { error: string };
+
+async function readBase(cwd: string): Promise<Base> {
+	const sha = await git(cwd, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]);
+	if (sha) return { sha: sha.trim() };
+	if ((await git(cwd, ["rev-parse", "--git-dir"])) !== undefined) return { sha: null };
+	return { error: "not a git repository, so there is no base commit" };
+}
+
+/** A file's content in commit `sha` (rel is relative to cwd), or undefined if it is not in it. */
+async function baseContent(cwd: string, sha: string, rel: string): Promise<string | undefined> {
+	const spec = `${sha}:./${rel}`;
+	if ((await git(cwd, ["cat-file", "-e", spec])) === undefined) return undefined;
+	const out = await git(cwd, ["cat-file", "blob", spec]);
+	if (out === undefined) throw new Error(`cannot read ${rel} from the base commit`);
+	return out;
+}
+
+const snapText = (s: Snapshot | undefined) => (s?.exists && s.mode !== -1 ? s.content.toString("utf8") : undefined);
+
+/** Dialog/denial wording for unit issues. */
+function describeIssues(issues: Issue[]): { short: string; long: string } {
+	const first = issues.slice(0, 2).map((i) => i.text);
+	const short = first.join(", ") + (issues.length > 2 ? `, +${issues.length - 2} more` : "");
+	const long = issues.map((i) => `line ${i.line}: ${i.text}`).join("\n");
+	return { short, long };
 }
 
 /** Added/removed line counts from a real line diff. */
@@ -393,11 +516,46 @@ async function reviewChange(ctx: ExtensionContext, r: Review): Promise<boolean> 
 	}, { overlay: true, overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: 0 } });
 }
 
+/**
+ * What a change to a unit-guarded file does to code from the base commit.
+ * `issues` is empty when the change only adds code; `error` means it could not be analysed,
+ * in which case the change is treated like a change to a whole guarded file.
+ */
+type UnitVerdict = { issues: Issue[]; error?: undefined } | { issues?: undefined; error: string };
+
 export default function (pi: ExtensionAPI) {
 	let failures = 0;
 	let stopped = false;
 	/** Guarded files as they were before each bash call, keyed by tool call id. */
 	const bashSnapshots = new Map<string, Map<string, Snapshot>>();
+	/** The latest guarded-file snapshots, reused (by lstat) so unchanged files are not read again. */
+	let lastSnapshots = new Map<string, Snapshot>();
+
+	/**
+	 * The configuration and base commit, read at session start and on each user message (not while
+	 * the agent works, so it cannot move either: e.g. by committing or editing the config).
+	 */
+	let state: { cwd: string; config: Promise<Config>; base: Promise<Base> } | undefined;
+	/** Parsed base-commit files, keyed by `sha:path`. */
+	let baseCache = new Map<string, Promise<Extracted | undefined>>();
+	const refreshState = (ctx: ExtensionContext) => {
+		const config = loadConfig(ctx.cwd);
+		const base = readBase(ctx.cwd);
+		state = { cwd: ctx.cwd, config, base };
+		baseCache = new Map();
+		if (ctx.hasUI) {
+			void config.then((c) => {
+				for (const e of c.errors) ctx.ui.notify(`check-guard: ${e}`, "warning");
+			});
+		}
+	};
+	const stateFor = (ctx: ExtensionContext) => {
+		if (state?.cwd !== ctx.cwd) refreshState(ctx);
+		return state!;
+	};
+	const configFor = (ctx: ExtensionContext) => stateFor(ctx).config;
+	/** Unit-analysis problems already shown to the user, so each is shown once per refresh. */
+	let notified = new Set<string>();
 
 	/**
 	 * Cached guarded-file aliases, built on first need. Dropped whenever symlinks or guarded files
@@ -406,9 +564,9 @@ export default function (pi: ExtensionAPI) {
 	 * extensions' tools).
 	 */
 	let aliasCache: { cwd: string; aliases: Promise<Aliases> } | undefined;
-	const aliasesFor = (cwd: string) => () => {
+	const aliasesFor = (cwd: string, cfg: Config) => () => {
 		if (aliasCache?.cwd !== cwd) {
-			const aliases = findAliases(cwd);
+			const aliases = findAliases(cwd, cfg);
 			aliasCache = { cwd, aliases };
 			// Never cache a failed scan.
 			aliases.catch(() => {
@@ -435,14 +593,62 @@ export default function (pi: ExtensionAPI) {
 		stopped = false;
 	};
 
-	// A new message from the user lets the agent try again.
-	pi.on("input", async (event) => {
-		if (event.source !== "extension") reset();
+	/**
+	 * Judge a change of unit-guarded file `rel` from `cur` to `next` (undefined: does not exist).
+	 * Deleting a file that is in the base commit removes all of its units.
+	 */
+	const judgeUnits = async (
+		ctx: ExtensionContext,
+		rel: string,
+		rule: Extract<Rule, { kind: "units" }>,
+		cur: string | undefined,
+		next: string | undefined,
+	): Promise<UnitVerdict> => {
+		try {
+			const b = await stateFor(ctx).base;
+			if ("error" in b) throw new Error(b.error);
+			const parse = await parserFor(ctx.cwd, rule.preset, rel, rule.grammar);
+			let base: Promise<Extracted | undefined> | undefined;
+			if (b.sha !== null) {
+				const key = `${b.sha}:${rel}`;
+				base = baseCache.get(key);
+				if (!base) {
+					base = baseContent(ctx.cwd, b.sha, rel).then((src) => (src === undefined ? undefined : parse(src)));
+					baseCache.set(key, base);
+					base.catch(() => baseCache.delete(key));
+				}
+			}
+			const baseUnits = await base;
+			if (next === undefined) {
+				if (!baseUnits) return { issues: [] };
+				return { issues: [{ line: 1, text: "deletes a file from the base commit" }] };
+			}
+			const empty = parse("");
+			return { issues: compare(baseUnits, cur === undefined ? empty : parse(cur), parse(next), rule.preset) };
+		} catch (err) {
+			const error = err instanceof Error ? err.message : String(err);
+			if (ctx.hasUI && !notified.has(error)) {
+				notified.add(error);
+				ctx.ui.notify(`check-guard: ${error}; guarding ${rel} as a whole file`, "warning");
+			}
+			return { error };
+		}
+	};
+
+	// A new message from the user lets the agent try again, and moves the base to the current HEAD.
+	pi.on("input", async (event, ctx) => {
+		if (event.source !== "extension") {
+			reset();
+			refreshState(ctx);
+			notified = new Set();
+		}
 		dropAliases();
 		return { action: "continue" };
 	});
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		reset();
+		refreshState(ctx);
+		notified = new Set();
 		dropAliases();
 	});
 	pi.on("turn_start", async () => dropAliases());
@@ -465,6 +671,10 @@ export default function (pi: ExtensionAPI) {
 		promptGuidelines: [
 			"Use the check tool to run the project check; do not run check.sh through bash.",
 			"A change is done only when the check tool passes.",
+			"Changing code that existed in the last commit of guarded test files (modifying, removing or renaming " +
+				"existing tests, fixtures, helpers, hooks or setup statements, or adding focused tests, hooks or mocks " +
+				"that change how existing tests run) needs the user's approval; adding new tests does not. " +
+				"Keep such changes in separate edits from new code, since a denied edit is rejected as a whole.",
 		],
 		parameters: Type.Object({}),
 		executionMode: "sequential",
@@ -527,41 +737,37 @@ export default function (pi: ExtensionAPI) {
 					reason: "Do not run check.sh through bash. Use the check tool to run the project check.",
 				};
 			}
-			bashSnapshots.set(event.toolCallId, await snapshotGuarded(ctx.cwd));
+			const cfg = await configFor(ctx);
+			lastSnapshots = await resnapshotGuarded(ctx.cwd, cfg, lastSnapshots);
+			bashSnapshots.set(event.toolCallId, lastSnapshots);
 			return undefined;
 		}
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-			const name = await guardedTarget(ctx.cwd, event.input.path, aliasesFor(ctx.cwd));
+			const cfg = await configFor(ctx);
+			const name = await guardedTarget(ctx.cwd, cfg, event.input.path, aliasesFor(ctx.cwd, cfg));
 			const file = name === undefined ? undefined : resolve(ctx.cwd, name);
-			// Unguarded, or a guarded file that does not exist yet: creating it is allowed.
-			if (file === undefined || !(await exists(ctx.cwd, file))) {
-				// A new file may sit under a symlinked directory and so add a guarded alias.
-				if (isToolCallEventType("write", event) && !(await exists(ctx.cwd, event.input.path))) {
-					createdByWrite.add(event.toolCallId);
-				}
-				return undefined;
+			// Unguarded, or a guarded file that does not exist yet: creating it is allowed
+			// (unit-guarded files are judged below, as a new file may still add e.g. a pytest hook).
+			const rule = ruleFor(cfg, name);
+			// A new file may sit under a symlinked directory and so add a guarded alias.
+			if (isToolCallEventType("write", event) && !(await exists(ctx.cwd, event.input.path))) {
+				createdByWrite.add(event.toolCallId);
 			}
-
-			const denied = {
-				block: true,
-				reason: `Changing ${name} requires the user's approval, which was not given. Do not try to change it another way; tell the user what change you want and why.`,
-			};
-			if (!ctx.hasUI) return denied;
+			const mayCreate = rule?.kind !== "units" && !GUARD_CREATION.includes(name ?? "");
+			if (file === undefined || (mayCreate && !(await exists(ctx.cwd, file)))) return undefined;
 
 			const current = await takeSnapshot(file);
-			const before = current.exists && current.mode !== -1 ? current.content.toString("utf8") : "";
+			const before = snapText(current) ?? "";
+			let after: string | undefined;
 			let review: Review;
 			if (isToolCallEventType("write", event)) {
-				const d = countChanges(before, event.input.content);
-				review = {
-					title: `Allow write ${name}? (+${d.added}/−${d.removed} lines)`,
-					before,
-					after: event.input.content,
-				};
+				after = event.input.content;
+				const d = countChanges(before, after);
+				review = { title: `Allow write ${name}? (+${d.added}/−${d.removed} lines)`, before, after };
 			} else {
 				const edits = event.input.edits;
-				const after = applyEdits(before, edits);
+				after = applyEdits(before, edits);
 				const n = `${edits.length} edit${edits.length === 1 ? "" : "s"}`;
 				if (after !== undefined) {
 					const d = countChanges(before.replace(/\r\n/g, "\n"), after);
@@ -578,6 +784,32 @@ export default function (pi: ExtensionAPI) {
 					review = { title: `Allow edit ${name}? (${n})`, before: "", after: "", rawDiff };
 				}
 			}
+
+			let what = `Changing ${name}`;
+			if (rule?.kind === "units") {
+				// An edit that cannot be applied exactly cannot be analysed: guard it as a whole file.
+				const verdict: UnitVerdict =
+					after === undefined
+						? { error: "edit does not apply exactly" }
+						: await judgeUnits(ctx, name!, rule, current.exists ? review.before : undefined, after);
+				if (verdict.issues) {
+					if (!verdict.issues.length) return undefined;
+					const { short, long } = describeIssues(verdict.issues);
+					review.title = review.title.replace(/\?/, `? It ${short}.`);
+					review.header = long;
+					what = `This change to ${name} ${short}, which`;
+				} else if (!current.exists) {
+					return undefined;
+				}
+			}
+
+			const denied = {
+				block: true,
+				reason:
+					`${what} requires the user's approval, which was not given. Do not try to change it another way; ` +
+					"tell the user what change you want and why.",
+			};
+			if (!ctx.hasUI) return denied;
 			const ok = await reviewChange(ctx, review);
 			return ok ? undefined : denied;
 		}
@@ -590,7 +822,8 @@ export default function (pi: ExtensionAPI) {
 		bashSnapshots.delete(event.toolCallId);
 		if (!before) return undefined;
 
-		const after = await resnapshotGuarded(ctx.cwd, before);
+		const cfg = await configFor(ctx);
+		const after = await resnapshotGuarded(ctx.cwd, cfg, before);
 		const names = [...new Set([...before.keys(), ...after.keys()])].sort();
 		const reverted: string[] = [];
 		const failed: string[] = [];
@@ -598,16 +831,37 @@ export default function (pi: ExtensionAPI) {
 			const was = before.get(name) ?? { exists: false };
 			const now = after.get(name) ?? { exists: false };
 			if (was === now || sameSnapshot(was, now)) continue;
-			// Creating a guarded file that did not exist before is allowed.
-			if (!was.exists) continue;
+
+			const rule = ruleFor(cfg, name);
+			let header = `$ ${String(event.input.command)}`;
+			let detail = "";
+			if (rule?.kind === "units") {
+				const cur = was.exists ? snapText(was) : undefined;
+				const next = now.exists ? snapText(now) : undefined;
+				const notText = (was.exists && cur === undefined) || (now.exists && next === undefined);
+				const verdict: UnitVerdict = notText
+					? { error: "not a regular file" }
+					: await judgeUnits(ctx, name, rule, cur, next);
+				if (verdict.issues) {
+					if (!verdict.issues.length) continue;
+					const { short, long } = describeIssues(verdict.issues);
+					detail = ` It ${short}.`;
+					header += `\n\n${long}`;
+				} else if (!was.exists) {
+					continue;
+				}
+			} else if (!was.exists && !GUARD_CREATION.includes(name)) {
+				// Creating a guarded file that did not exist before is allowed.
+				continue;
+			}
 
 			if (ctx.hasUI) {
 				const what = !now.exists ? "deleted" : !was.exists ? "created" : "changed";
-				const text = (s: Snapshot) => (s.exists && s.mode !== -1 ? s.content.toString("utf8") : "");
+				const text = (s: Snapshot) => snapText(s) ?? "";
 				const d = countChanges(text(was), text(now));
 				const ok = await reviewChange(ctx, {
-					title: `bash ${what} ${name} (+${d.added}/−${d.removed} lines). Keep?`,
-					header: `$ ${String(event.input.command)}`,
+					title: `bash ${what} ${name} (+${d.added}/−${d.removed} lines).${detail} Keep?`,
+					header,
 					before: text(was),
 					after: text(now),
 				});
@@ -625,7 +879,8 @@ export default function (pi: ExtensionAPI) {
 		const notes: string[] = [];
 		if (reverted.length) {
 			notes.push(
-				`This command changed ${reverted.join(", ")} without the user's approval, so the change was reverted.`,
+				`This command changed ${reverted.join(", ")} without the user's approval, so the whole file was reverted ` +
+					"(including any new code the command added to it).",
 			);
 		}
 		if (failed.length) {

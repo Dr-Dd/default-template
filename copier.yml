@@ -7,3 +7,4 @@ _exclude:
 
 _skip_if_exists:
   - check.sh
+  - .pi/check-guard.json

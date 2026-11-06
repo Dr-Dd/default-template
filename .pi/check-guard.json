@@ -1,0 +1,4 @@
+{
+  "guardedFiles": ["check.sh"],
+  "unitGuardedFiles": []
+}

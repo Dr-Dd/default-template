@@ -35,3 +35,4 @@ coverage/
 # Pi-installed packages (no trailing slash: tickets.sh symlinks them into worktrees)
 .pi/git
 .pi/npm
+.pi/check-guard/node_modules
