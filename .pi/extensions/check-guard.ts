@@ -5,15 +5,17 @@
  * - Running check.sh through bash is blocked, so the exit code cannot be hidden.
  * - After PI_CHECK_MAX_FAILURES (default 3) failing `check` runs in a row, the
  *   agent is stopped until the user sends a new message.
- * - Changing check.sh needs the user's approval: write/edit ask first; changes
- *   made through bash are detected afterwards and reverted unless approved.
+ * - Changing or deleting an existing guarded file (GUARDED_FILES globs, by default
+ *   just check.sh) needs the user's approval: write/edit ask first; changes made
+ *   through bash are detected afterwards and reverted unless approved. Creating a
+ *   guarded file that does not exist yet is always allowed.
  *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles
  *   the whole file). PI_CHECK_DIFF_CONTEXT sets the context lines (default 4).
  */
 
-import { lstat, readFile, realpath, rm, writeFile, chmod } from "node:fs/promises";
+import { chmod, glob, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { resolve } from "node:path";
+import { dirname, isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -27,14 +29,39 @@ import {
 import { matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
+/** The project check script run by the `check` tool. */
 const CHECK_FILE = "check.sh";
+/**
+ * Files (globs relative to the project root) that need the user's approval to change or delete.
+ * Globs match files only: use `dir/**` to guard every file inside a directory.
+ */
+const GUARDED_FILES: readonly string[] = ["check.sh"];
+/** Directories never searched for guarded files. */
+const GLOB_SKIP_DIRS = new Set([".git", "node_modules"]);
 const DEFAULT_MAX_FAILURES = 3;
 
 /** check.sh invoked as a command: `./check.sh`, `bash check.sh`, `sh -c './check.sh'`, `source check.sh`, ... */
 const CHECK_INVOCATION =
 	/(?:^|[\n;&|(`]|\$\()\s*(?:(?:\w+=\S*|exec|time|nohup|env|command|nice|timeout(?:\s+(?:-\S+|[A-Z]+))*\s+\S+)\s+)*(?:(?:ba|da|z|k)?sh\s+(?:-\S+\s+)*|source\s+|\.\s+)?["']?(?:\S*\/)?check\.sh(?![\w.-])/;
 
-type Snapshot = { exists: false } | { exists: true; content: Buffer; mode: number };
+/** lstat fields that change whenever a file's content or mode changes (ctime cannot be set by user programs). */
+type Stamp = { dev: bigint; ino: bigint; size: bigint; mode: bigint; mtimeNs: bigint; ctimeNs: bigint };
+
+type Snapshot =
+	| { exists: false }
+	| {
+			exists: true;
+			content: Buffer;
+			mode: number;
+			/** lstat taken before reading; undefined when it cannot be trusted to detect changes. */
+			stamp?: Stamp;
+		};
+
+/**
+ * A file changed this close to the snapshot may be changed again without its timestamps moving
+ * (coarse filesystem clocks, e.g. 2 s on FAT), so its stamp is not trusted, as git does for "racy" files.
+ */
+const RACY_WINDOW_NS = 2_000_000_000n;
 
 function maxFailures(): number {
 	const raw = process.env.PI_CHECK_MAX_FAILURES;
@@ -43,13 +70,62 @@ function maxFailures(): number {
 }
 
 async function takeSnapshot(file: string): Promise<Snapshot> {
+	const takenAtNs = BigInt(Date.now()) * 1_000_000n;
 	try {
-		const st = await lstat(file);
+		// Stat before reading: if the file changes in between, the stamp is older than the content,
+		// which only causes an extra read later, never a missed change.
+		const st = await lstat(file, { bigint: true });
 		if (!st.isFile()) return { exists: true, content: Buffer.alloc(0), mode: -1 };
-		return { exists: true, content: await readFile(file), mode: st.mode & 0o7777 };
+		const stamp: Stamp = {
+			dev: st.dev,
+			ino: st.ino,
+			size: st.size,
+			mode: st.mode,
+			mtimeNs: st.mtimeNs,
+			ctimeNs: st.ctimeNs,
+		};
+		const racy = st.mtimeNs >= takenAtNs - RACY_WINDOW_NS || st.ctimeNs >= takenAtNs - RACY_WINDOW_NS;
+		return {
+			exists: true,
+			content: await readFile(file),
+			mode: Number(st.mode & 0o7777n),
+			stamp: racy ? undefined : stamp,
+		};
 	} catch {
 		return { exists: false };
 	}
+}
+
+function sameStamp(a: Stamp, b: Stamp): boolean {
+	return (
+		a.dev === b.dev &&
+		a.ino === b.ino &&
+		a.size === b.size &&
+		a.mode === b.mode &&
+		a.mtimeNs === b.mtimeNs &&
+		a.ctimeNs === b.ctimeNs
+	);
+}
+
+/** `prev` itself if lstat shows the file is untouched (no read), otherwise a fresh snapshot. */
+async function resnapshot(file: string, prev: Snapshot | undefined): Promise<Snapshot> {
+	if (prev?.exists && prev.stamp) {
+		try {
+			const st = await lstat(file, { bigint: true });
+			const now: Stamp = {
+				dev: st.dev,
+				ino: st.ino,
+				size: st.size,
+				mode: st.mode,
+				mtimeNs: st.mtimeNs,
+				ctimeNs: st.ctimeNs,
+			};
+			if (st.isFile() && sameStamp(prev.stamp, now)) return prev;
+		} catch {
+			// Gone or unreadable: fall through to a full snapshot.
+		}
+	}
+	return takeSnapshot(file);
 }
 
 function sameSnapshot(a: Snapshot, b: Snapshot): boolean {
@@ -62,20 +138,113 @@ async function restoreSnapshot(file: string, snap: Snapshot): Promise<void> {
 	if (snap.exists && snap.mode === -1) return;
 	await rm(file, { recursive: true, force: true });
 	if (!snap.exists) return;
+	// The parent directory may have been removed too (e.g. `rm -r dir`).
+	await mkdir(dirname(file), { recursive: true });
 	await writeFile(file, snap.content);
 	await chmod(file, snap.mode);
 }
 
-/** Absolute, symlink-resolved path a write/edit targets. */
-async function targetPath(cwd: string, raw: string): Promise<string> {
+/** Path relative to cwd with `/` separators, or undefined if it is outside cwd. */
+function relPath(cwd: string, abs: string): string | undefined {
+	const rel = relative(cwd, abs);
+	if (!rel || rel.startsWith("..") || isAbsolute(rel)) return undefined;
+	return rel.split(sep).join("/");
+}
+
+function isGuardedRel(rel: string | undefined): rel is string {
+	return rel !== undefined && GUARDED_FILES.some((g) => matchesGlob(rel, g));
+}
+
+/**
+ * Guarded files that currently exist, relative to cwd. Directories are skipped: a glob guards
+ * files (use `dir/**` for everything inside a directory), and a directory cannot be restored.
+ */
+async function guardedFiles(cwd: string): Promise<string[]> {
+	const found = new Set<string>();
+	const exclude = (p: string) => p.split(/[\\/]/).some((part) => GLOB_SKIP_DIRS.has(part));
+	for await (const rel of glob([...GUARDED_FILES], { cwd, exclude })) {
+		const st = await lstat(resolve(cwd, rel)).catch(() => undefined);
+		if (st && !st.isDirectory()) found.add(rel.split(sep).join("/"));
+	}
+	return [...found].sort();
+}
+
+/** Whether a tool path (as given to write/edit) exists, without following a final symlink. */
+async function exists(cwd: string, raw: string): Promise<boolean> {
 	let p = raw.startsWith("@") ? raw.slice(1) : raw;
 	if (p === "~" || p.startsWith("~/")) p = homedir() + p.slice(1);
-	const abs = resolve(cwd, p);
+	try {
+		await lstat(resolve(cwd, p));
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+async function realOrSelf(abs: string): Promise<string> {
 	try {
 		return await realpath(abs);
 	} catch {
 		return abs;
 	}
+}
+
+/**
+ * Guarded files reached through a symlink (the file itself or a parent directory), keyed by the
+ * real path they resolve to. Only these can hide behind an unguarded path: a guarded file that is
+ * not behind a symlink is its own real path, which guardedTarget matches against the globs directly.
+ */
+type Aliases = Map<string, string>;
+
+async function findAliases(cwd: string): Promise<Aliases> {
+	const aliases: Aliases = new Map();
+	for (const rel of await guardedFiles(cwd)) {
+		const abs = resolve(cwd, rel);
+		const real = await realOrSelf(abs);
+		if (real !== abs && !aliases.has(real)) aliases.set(real, rel);
+	}
+	return aliases;
+}
+
+/**
+ * The guarded file (relative to cwd) a write/edit path targets, if any. Matches the path as
+ * given, its symlink-resolved path, and existing guarded files that resolve to the same file.
+ * `aliases` is called only when the target exists and matches no glob itself.
+ */
+async function guardedTarget(
+	cwd: string,
+	raw: string,
+	aliases: () => Promise<Aliases>,
+): Promise<string | undefined> {
+	let p = raw.startsWith("@") ? raw.slice(1) : raw;
+	if (p === "~" || p.startsWith("~/")) p = homedir() + p.slice(1);
+	const abs = resolve(cwd, p);
+	const real = await realOrSelf(abs);
+	for (const candidate of [abs, real]) {
+		const rel = relPath(cwd, candidate);
+		if (isGuardedRel(rel)) return rel;
+	}
+	// A target that does not exist cannot be the resolved path of an existing guarded file.
+	try {
+		await lstat(real);
+	} catch {
+		return undefined;
+	}
+	return (await aliases()).get(real);
+}
+
+/** Snapshots of every guarded file that exists now. */
+async function snapshotGuarded(cwd: string): Promise<Map<string, Snapshot>> {
+	const snaps = new Map<string, Snapshot>();
+	for (const rel of await guardedFiles(cwd)) snaps.set(rel, await takeSnapshot(resolve(cwd, rel)));
+	return snaps;
+}
+
+/** Like snapshotGuarded, but files whose lstat matches `before` are reused without being read. */
+async function resnapshotGuarded(cwd: string, before: Map<string, Snapshot>): Promise<Map<string, Snapshot>> {
+	const snaps = new Map<string, Snapshot>();
+	for (const rel of await guardedFiles(cwd)) snaps.set(rel, await resnapshot(resolve(cwd, rel), before.get(rel)));
+	return snaps;
 }
 
 /** Added/removed line counts from a real line diff. */
@@ -89,7 +258,7 @@ function countChanges(before: string, after: string): { removed: number; added: 
 	return { removed, added };
 }
 
-/** check.sh after applying `edits`, or undefined if an oldText does not match exactly once. */
+/** File content after applying `edits`, or undefined if an oldText does not match exactly once. */
 function applyEdits(content: string, edits: { oldText: string; newText: string }[]): string | undefined {
 	let out = content.replace(/\r\n/g, "\n");
 	for (const e of edits) {
@@ -123,7 +292,7 @@ function buildDiff(r: Review, context: number): string {
 }
 
 /**
- * Ask the user to approve a change to check.sh, showing the full diff.
+ * Ask the user to approve a change to a guarded file, showing the full diff.
  * TUI: full-screen scrollable overlay; `y`/`n` pick an answer and Enter confirms it
  * (Esc does not deny, so a stray keypress cannot answer). RPC: confirm with the full diff.
  */
@@ -227,8 +396,34 @@ async function reviewChange(ctx: ExtensionContext, r: Review): Promise<boolean> 
 export default function (pi: ExtensionAPI) {
 	let failures = 0;
 	let stopped = false;
-	/** check.sh as it was before each bash call, keyed by tool call id. */
-	const bashSnapshots = new Map<string, Snapshot>();
+	/** Guarded files as they were before each bash call, keyed by tool call id. */
+	const bashSnapshots = new Map<string, Map<string, Snapshot>>();
+
+	/**
+	 * Cached guarded-file aliases, built on first need. Dropped whenever symlinks or guarded files
+	 * may have changed: a new turn or user message (you may have changed files yourself), a `!` command,
+	 * a `write` that created a file, and any tool not known to leave files alone (bash, check, other
+	 * extensions' tools).
+	 */
+	let aliasCache: { cwd: string; aliases: Promise<Aliases> } | undefined;
+	const aliasesFor = (cwd: string) => () => {
+		if (aliasCache?.cwd !== cwd) {
+			const aliases = findAliases(cwd);
+			aliasCache = { cwd, aliases };
+			// Never cache a failed scan.
+			aliases.catch(() => {
+				if (aliasCache?.aliases === aliases) aliasCache = undefined;
+			});
+		}
+		return aliasCache.aliases;
+	};
+	const dropAliases = () => {
+		aliasCache = undefined;
+	};
+	/** Tools that never create, delete or relink files. `write` is handled via createdByWrite. */
+	const LINK_SAFE_TOOLS = new Set(["read", "edit", "grep", "find", "ls"]);
+	/** write calls whose target did not exist yet, keyed by tool call id. */
+	const createdByWrite = new Set<string>();
 
 	const checkFile = (ctx: ExtensionContext) => resolve(ctx.cwd, CHECK_FILE);
 	const stopReason = () =>
@@ -243,9 +438,22 @@ export default function (pi: ExtensionAPI) {
 	// A new message from the user lets the agent try again.
 	pi.on("input", async (event) => {
 		if (event.source !== "extension") reset();
+		dropAliases();
 		return { action: "continue" };
 	});
-	pi.on("session_start", async () => reset());
+	pi.on("session_start", async () => {
+		reset();
+		dropAliases();
+	});
+	pi.on("turn_start", async () => dropAliases());
+	pi.on("user_bash", async () => {
+		dropAliases();
+		return undefined;
+	});
+	pi.on("tool_execution_end", async (event) => {
+		const created = createdByWrite.delete(event.toolCallId);
+		if (created || (event.toolName !== "write" && !LINK_SAFE_TOOLS.has(event.toolName))) dropAliases();
+	});
 
 	pi.registerTool({
 		name: "check",
@@ -319,19 +527,25 @@ export default function (pi: ExtensionAPI) {
 					reason: "Do not run check.sh through bash. Use the check tool to run the project check.",
 				};
 			}
-			bashSnapshots.set(event.toolCallId, await takeSnapshot(checkFile(ctx)));
+			bashSnapshots.set(event.toolCallId, await snapshotGuarded(ctx.cwd));
 			return undefined;
 		}
 
 		if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
-			const file = checkFile(ctx);
-			const target = await targetPath(ctx.cwd, event.input.path);
-			const real = await targetPath(ctx.cwd, file);
-			if (target !== file && target !== real) return undefined;
+			const name = await guardedTarget(ctx.cwd, event.input.path, aliasesFor(ctx.cwd));
+			const file = name === undefined ? undefined : resolve(ctx.cwd, name);
+			// Unguarded, or a guarded file that does not exist yet: creating it is allowed.
+			if (file === undefined || !(await exists(ctx.cwd, file))) {
+				// A new file may sit under a symlinked directory and so add a guarded alias.
+				if (isToolCallEventType("write", event) && !(await exists(ctx.cwd, event.input.path))) {
+					createdByWrite.add(event.toolCallId);
+				}
+				return undefined;
+			}
 
 			const denied = {
 				block: true,
-				reason: `Changing ${CHECK_FILE} requires the user's approval, which was not given. Do not try to change it another way; tell the user what change you want and why.`,
+				reason: `Changing ${name} requires the user's approval, which was not given. Do not try to change it another way; tell the user what change you want and why.`,
 			};
 			if (!ctx.hasUI) return denied;
 
@@ -341,7 +555,7 @@ export default function (pi: ExtensionAPI) {
 			if (isToolCallEventType("write", event)) {
 				const d = countChanges(before, event.input.content);
 				review = {
-					title: `Allow write ${CHECK_FILE}? (+${d.added}/−${d.removed} lines)`,
+					title: `Allow write ${name}? (+${d.added}/−${d.removed} lines)`,
 					before,
 					after: event.input.content,
 				};
@@ -352,7 +566,7 @@ export default function (pi: ExtensionAPI) {
 				if (after !== undefined) {
 					const d = countChanges(before.replace(/\r\n/g, "\n"), after);
 					review = {
-						title: `Allow edit ${CHECK_FILE}? (${n}, +${d.added}/−${d.removed} lines)`,
+						title: `Allow edit ${name}? (${n}, +${d.added}/−${d.removed} lines)`,
 						before: before.replace(/\r\n/g, "\n"),
 						after,
 					};
@@ -361,7 +575,7 @@ export default function (pi: ExtensionAPI) {
 					const rawDiff = edits
 						.map((e, i) => `Edit ${i + 1}/${edits.length}\n${generateDiffString(e.oldText, e.newText, 2).diff}`)
 						.join("\n\n");
-					review = { title: `Allow edit ${CHECK_FILE}? (${n})`, before: "", after: "", rawDiff };
+					review = { title: `Allow edit ${name}? (${n})`, before: "", after: "", rawDiff };
 				}
 			}
 			const ok = await reviewChange(ctx, review);
@@ -376,30 +590,54 @@ export default function (pi: ExtensionAPI) {
 		bashSnapshots.delete(event.toolCallId);
 		if (!before) return undefined;
 
-		const file = checkFile(ctx);
-		const after = await takeSnapshot(file);
-		if (sameSnapshot(before, after)) return undefined;
+		const after = await resnapshotGuarded(ctx.cwd, before);
+		const names = [...new Set([...before.keys(), ...after.keys()])].sort();
+		const reverted: string[] = [];
+		const failed: string[] = [];
+		for (const name of names) {
+			const was = before.get(name) ?? { exists: false };
+			const now = after.get(name) ?? { exists: false };
+			if (was === now || sameSnapshot(was, now)) continue;
+			// Creating a guarded file that did not exist before is allowed.
+			if (!was.exists) continue;
 
-		if (ctx.hasUI) {
-			const what = !after.exists ? "deleted" : !before.exists ? "created" : "changed";
-			const text = (s: Snapshot) => (s.exists && s.mode !== -1 ? s.content.toString("utf8") : "");
-			const d = countChanges(text(before), text(after));
-			const ok = await reviewChange(ctx, {
-				title: `bash ${what} ${CHECK_FILE} (+${d.added}/−${d.removed} lines). Keep?`,
-				header: `$ ${String(event.input.command)}`,
-				before: text(before),
-				after: text(after),
-			});
-			if (ok) return undefined;
+			if (ctx.hasUI) {
+				const what = !now.exists ? "deleted" : !was.exists ? "created" : "changed";
+				const text = (s: Snapshot) => (s.exists && s.mode !== -1 ? s.content.toString("utf8") : "");
+				const d = countChanges(text(was), text(now));
+				const ok = await reviewChange(ctx, {
+					title: `bash ${what} ${name} (+${d.added}/−${d.removed} lines). Keep?`,
+					header: `$ ${String(event.input.command)}`,
+					before: text(was),
+					after: text(now),
+				});
+				if (ok) continue;
+			}
+			try {
+				await restoreSnapshot(resolve(ctx.cwd, name), was);
+				reverted.push(name);
+			} catch (err) {
+				failed.push(`${name} (${err instanceof Error ? err.message : String(err)})`);
+			}
 		}
+		if (!reverted.length && !failed.length) return undefined;
 
-		await restoreSnapshot(file, before);
+		const notes: string[] = [];
+		if (reverted.length) {
+			notes.push(
+				`This command changed ${reverted.join(", ")} without the user's approval, so the change was reverted.`,
+			);
+		}
+		if (failed.length) {
+			notes.push(`This command changed guarded files that could not be restored: ${failed.join("; ")}.`);
+			if (ctx.hasUI) ctx.ui.notify(`check-guard could not restore: ${failed.join("; ")}`, "error");
+		}
 		return {
 			content: [
 				...event.content,
 				{
 					type: "text",
-					text: `\n[check-guard] This command changed ${CHECK_FILE} without the user's approval, so the change was reverted. Do not try to change it another way; tell the user what change you want and why.`,
+					text: `\n[check-guard] ${notes.join(" ")} Do not try to change it another way; tell the user what change you want and why.`,
 				},
 			],
 		};
