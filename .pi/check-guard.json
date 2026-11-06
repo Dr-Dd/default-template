@@ -1,4 +1,3 @@
 {
-  "guardedFiles": ["check.sh"],
-  "unitGuardedFiles": []
+  "guardedFiles": ["check.sh"]
 }

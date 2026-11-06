@@ -6,9 +6,10 @@ Lookups: For narrow searches ("where is X defined", "who calls Y") run one-shot 
 
 You are the only agent that edits files in this repo. Subagents read and advise; they never write.
 
-1. Plan: If the working tree is not clean, or SPEC.md or .review/ exists, stop and tell me before planning. Run the `check` tool once before changing anything; if it fails, stop and tell me, with its output. Read the relevant code and write SPEC.md (what changes, files touched, how we know it works). Stop and wait for my approval.
+1. Plan: If the working tree is not clean, or SPEC.md or .review/ exists, stop and tell me before planning. Run the `check` tool once before changing anything; if it fails, stop and tell me, with its output. Read the relevant code and write SPEC.md (what changes, files touched, test cases: one line per behaviour). Stop and wait for my approval.
 2. Build: implement SPEC.md. The change is done when the `check` tool passes.
   - Make the check pass by fixing the code, never by weakening, skipping or deleting existing tests. Change an existing test only if SPEC.md lists it, ask me to approve each one. If the spec and an existing test disagree, stop and tell me.
+  - Write only the tests listed in SPEC.md, each in a new test file next to the tests of the code it covers (helpers and fixtures they need are fine). If the list seems wrong or incomplete, stop and tell me.
 3. Review: when the check passes, run one `reviewer` subagent with fresh context.
   - Prepare: Run `git add -N` on every new file you created (so it shows up in the diff), then `mkdir -p .review && git diff HEAD > .review/diff.patch`. Overwrite this file every round.
   - The reviewer already knows how to review and how to report. Its task is: "Review the change. Spec: SPEC.md. Patch: .review/diff.patch." Add only context the spec does not make obvious. Do not paste the diff into the task.

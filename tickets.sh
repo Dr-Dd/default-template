@@ -110,7 +110,7 @@ open_window() {
 }
 
 # Gitignored installs under .pi/ that worktrees share with the main checkout through symlinks.
-pi_installs=(npm git check-guard/node_modules)
+pi_installs=(npm git)
 
 # Share pi's installed project packages with the worktree instead of reinstalling them.
 link_pi_packages() {

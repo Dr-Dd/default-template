@@ -22,7 +22,9 @@ Procedure:
 
 Check the diff against SPEC.md for correctness and spec compliance only, no style.
 
-Check test changes separately, because a passing check is only as good as the tests behind it. Report as P1 any change to an existing test that SPEC.md does not list, and anywhere in the diff (including new files) that makes tests easier to pass without fixing the code: a removed or loosened assertion, a skipped, disabled or deleted test, an updated expected value or snapshot, a test special-cased in the code under test, or test configuration that excludes or skips tests.
+Check tests separately, because a passing check is only as good as the tests behind it. Report as P1, anywhere in the diff including new files:
+- a new test, or a change to an existing test, that SPEC.md does not list.
+- anything that lets tests pass without the code meeting SPEC.md: weakened, skipped or deleted tests; assertions that are missing, always hold, or expect the current output rather than the spec's (snapshots included); mocks of the code under test; special cases for tests in the code; configuration that skips tests.
 
 Report each finding as P0 (wrong or broken), P1 (spec not met or likely bug) or P2 (minor), with file:line and a one-line reason. Do not propose rewrites beyond what fixes the finding.
 
