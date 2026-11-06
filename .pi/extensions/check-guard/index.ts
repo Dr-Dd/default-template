@@ -47,19 +47,15 @@ const DEFAULT_GUARDED: readonly string[] = ["check.sh"];
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
 /** Directories never searched for guarded files. */
 const GLOB_SKIP_DIRS = new Set([".git", "node_modules", ".venv", "venv", ".tox", "__pycache__"]);
-const DEFAULT_MAX_FAILURES = 3;
-
-function maxFailures(): number {
-	const n = Number(process.env.PI_CHECK_MAX_FAILURES);
-	return Number.isInteger(n) && n > 0 ? n : DEFAULT_MAX_FAILURES;
-}
-
-/** Context lines around each change in the review dialog; `c` toggles the whole file. */
-function diffContext(): number {
-	const raw = process.env.PI_CHECK_DIFF_CONTEXT;
+/** Integer environment variable that is at least `min`, else `fallback`. */
+function envInt(name: string, min: number, fallback: number): number {
+	const raw = process.env[name];
 	const n = raw === undefined || raw === "" ? NaN : Number(raw);
-	return Number.isInteger(n) && n >= 0 ? n : 4;
+	return Number.isInteger(n) && n >= min ? n : fallback;
 }
+const maxFailures = () => envInt("PI_CHECK_MAX_FAILURES", 1, 3);
+/** Context lines around each change in the review dialog; `c` toggles the whole file. */
+const diffContext = () => envInt("PI_CHECK_DIFF_CONTEXT", 0, 4);
 
 // ---------------------------------------------------------------- configuration
 
@@ -93,14 +89,6 @@ async function loadConfig(cwd: string): Promise<Config> {
 		const g = globs(obj.guardedFiles);
 		if (g) cfg.guarded = g;
 		else cfg.errors.push(`${CONFIG_FILE}: guardedFiles must be a list of globs`);
-	}
-	// Per-unit guarding was removed: guard its files as whole files rather than dropping them.
-	if (Array.isArray(obj.unitGuardedFiles) && obj.unitGuardedFiles.length) {
-		for (const e of obj.unitGuardedFiles) cfg.guarded.push(...(globs((e as { files?: unknown })?.files) ?? []));
-		cfg.errors.push(
-			`${CONFIG_FILE}: unitGuardedFiles is no longer supported; its files are guarded as whole files ` +
-				"(move them to guardedFiles)",
-		);
 	}
 	return cfg;
 }
@@ -155,18 +143,17 @@ function committedFiles(cwd: string): Promise<Set<string> | undefined> {
 }
 
 /**
- * Guarded files that exist now. With `frozen`, only frozen ones (the baseline): committed in HEAD
- * (all of them if there is no commit), frozen before (`frozen.sticky`: untracking a file must not
+ * Guarded files that exist now. With `sticky`, only frozen ones (the baseline): committed in HEAD
+ * (all of them if there is no commit), in `sticky` (frozen before: untracking a file must not
  * unfreeze it), or always guarded. Directories are skipped: use `dir/**` to guard their contents.
  */
-async function snapshot(cwd: string, cfg: Config, frozen?: { sticky: ReadonlySet<string> }): Promise<Snapshot> {
+async function snapshot(cwd: string, cfg: Config, sticky?: ReadonlySet<string>): Promise<Snapshot> {
 	const snap: Snapshot = new Map();
-	const sticky = frozen?.sticky ?? new Set<string>();
-	const committed = frozen && (await committedFiles(cwd));
+	const committed = sticky && (await committedFiles(cwd));
 	const exclude = (p: string) => p.split(/[\\/]/).some((part) => GLOB_SKIP_DIRS.has(part));
 	for await (const rel of glob(allGlobs(cfg), { cwd, exclude })) {
 		const name = rel.split(sep).join("/");
-		if (committed && !committed.has(name) && !sticky.has(name) && !isAlwaysGuarded(name)) continue;
+		if (committed && !committed.has(name) && !sticky!.has(name) && !isAlwaysGuarded(name)) continue;
 		const st = await readState(resolve(cwd, name));
 		if (st) snap.set(name, st);
 	}
@@ -203,50 +190,45 @@ async function guardedTarget(cwd: string, cfg: Config, raw: string): Promise<str
 // ---------------------------------------------------------------- diffs and the approval dialog
 
 const text = (s: FileState | undefined) => s?.content.toString("utf8") ?? "";
+const lf = (s: string) => s.replace(/\r\n/g, "\n");
 
-/** Added/removed line counts from a real line diff. */
-function countChanges(before: string, after: string): { removed: number; added: number } {
+/** "+added/−removed lines", counted from a real line diff. */
+function changeSummary(before: string, after: string): string {
 	let removed = 0;
 	let added = 0;
 	for (const line of generateDiffString(before, after, 0).diff.split("\n")) {
 		if (line.startsWith("-")) removed++;
 		else if (line.startsWith("+")) added++;
 	}
-	return { removed, added };
+	return `+${added}/−${removed} lines`;
 }
 
 /** File content after applying `edits`, or undefined if an oldText does not match exactly once. */
 function applyEdits(content: string, edits: { oldText: string; newText: string }[]): string | undefined {
-	let out = content.replace(/\r\n/g, "\n");
+	let out = lf(content);
 	for (const e of edits) {
-		const oldText = e.oldText.replace(/\r\n/g, "\n");
+		const oldText = lf(e.oldText);
 		const at = out.indexOf(oldText);
 		if (at === -1 || out.indexOf(oldText, at + 1) !== -1) return undefined;
-		out = out.slice(0, at) + e.newText.replace(/\r\n/g, "\n") + out.slice(at + oldText.length);
+		out = out.slice(0, at) + lf(e.newText) + out.slice(at + oldText.length);
 	}
 	return out;
 }
 
-type Review = {
-	title: string;
-	before: string;
-	after: string;
-	/** Used instead of before/after when the edit cannot be applied to the current file. */
-	rawDiff?: string;
-};
-
-function buildDiff(r: Review, context: number): string {
-	if (r.rawDiff !== undefined) return r.rawDiff;
-	return generateDiffString(r.before, r.after, context).diff || "(no textual change)";
-}
+/** A diff with the given number of context lines. */
+type DiffFn = (context: number) => string;
+const contentDiff =
+	(before: string, after: string): DiffFn =>
+	(context) =>
+		generateDiffString(before, after, context).diff || "(no textual change)";
 
 /**
  * Ask the user to approve a change to a guarded file, showing the full diff.
  * TUI: full-screen scrollable overlay; `y`/`n` pick an answer and Enter confirms it
  * (Esc does not deny, so a stray keypress cannot answer). Other UIs: confirm with the full diff.
  */
-async function reviewChange(ctx: ExtensionContext, r: Review): Promise<boolean> {
-	if (ctx.mode !== "tui") return ctx.ui.confirm(r.title, buildDiff(r, diffContext()));
+async function reviewChange(ctx: ExtensionContext, title: string, diff: DiffFn): Promise<boolean> {
+	if (ctx.mode !== "tui") return ctx.ui.confirm(title, diff(diffContext()));
 
 	return ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
 		let full = false;
@@ -260,7 +242,7 @@ async function reviewChange(ctx: ExtensionContext, r: Review): Promise<boolean> 
 		const viewHeight = () => Math.max(1, tui.terminal.rows - CHROME);
 		const content = (width: number): string[] => {
 			if (lines && linesWidth === width) return lines;
-			lines = renderDiff(buildDiff(r, full ? Number.MAX_SAFE_INTEGER : diffContext()))
+			lines = renderDiff(diff(full ? Number.MAX_SAFE_INTEGER : diffContext()))
 				.split("\n")
 				.flatMap((l) => wrapTextWithAnsi(l, width));
 			linesWidth = width;
@@ -299,7 +281,7 @@ async function reviewChange(ctx: ExtensionContext, r: Review): Promise<boolean> 
 					`${pos}y allow · n deny · enter confirm · ↑↓/pgup/pgdn/home/end/wheel scroll · ` +
 					`c ${full ? "changes only" : "whole file"}`;
 				return [
-					truncateToWidth(theme.fg("warning", theme.bold(r.title)), width),
+					truncateToWidth(theme.fg("warning", theme.bold(title)), width),
 					theme.fg("dim", "─".repeat(width)),
 					...shown,
 					theme.fg("dim", "─".repeat(width)),
@@ -346,23 +328,22 @@ export default function (pi: ExtensionAPI) {
 	/**
 	 * The configuration and the baseline of guarded files, taken at session start and when the user
 	 * sends a message while the agent is idle (never while it works, so it cannot move either).
-	 * Approved changes update the baseline.
+	 * Approved changes update the baseline. Each session gets a new extension instance and
+	 * session_start runs before anything else, so these are always set before they are used.
 	 */
-	let state: { cwd: string; config: Promise<Config>; baseline: Promise<Snapshot> } | undefined;
+	let config: Config = { guarded: [...DEFAULT_GUARDED], errors: [] };
+	let baseline: Snapshot = new Map();
 	/** Re-read the config and take a new baseline. Await it: the agent must not run before the baseline is taken. */
 	const refreshState = async (ctx: ExtensionContext) => {
-		const prev = state?.cwd === ctx.cwd ? await state.baseline.catch(() => undefined) : undefined;
-		const sticky = new Set(prev?.keys());
-		const config = loadConfig(ctx.cwd);
-		const baseline = config.then((c) => snapshot(ctx.cwd, c, { sticky }));
-		state = { cwd: ctx.cwd, config, baseline };
-		const cfg = await config;
-		if (ctx.hasUI) for (const e of cfg.errors) ctx.ui.notify(`check-guard: ${e}`, "warning");
-		await baseline;
+		config = await loadConfig(ctx.cwd);
+		if (ctx.hasUI) for (const e of config.errors) ctx.ui.notify(`check-guard: ${e}`, "warning");
+		baseline = await snapshot(ctx.cwd, config, new Set(baseline.keys()));
 	};
-	const stateFor = (ctx: ExtensionContext) => {
-		if (state?.cwd !== ctx.cwd) void refreshState(ctx);
-		return state!;
+	/** Frozen guarded files: changing, deleting or creating them needs the user's approval. */
+	const needsApproval = (name: string) => baseline.has(name) || isAlwaysGuarded(name);
+	const setBaseline = (name: string, st: FileState | undefined) => {
+		if (st) baseline.set(name, st);
+		else baseline.delete(name);
 	};
 	/** write/edit calls the user approved, keyed by tool call id: their result becomes the baseline. */
 	const approved = new Map<string, string>();
@@ -377,26 +358,19 @@ export default function (pi: ExtensionAPI) {
 	 * (without a UI, every change is denied); denied changes are reverted.
 	 */
 	const gate = async (ctx: ExtensionContext): Promise<{ reverted: string[]; failed: string[] }> => {
-		const s = stateFor(ctx);
-		const baseline = await s.baseline;
-		const current = await snapshot(ctx.cwd, await s.config);
+		const current = await snapshot(ctx.cwd, config);
 		const reverted: string[] = [];
 		const failed: string[] = [];
 		for (const name of [...new Set([...baseline.keys(), ...current.keys()])].sort()) {
 			const was = baseline.get(name);
 			const now = current.get(name);
-			if (sameState(was, now) || (!was && !isAlwaysGuarded(name))) continue;
+			if (sameState(was, now) || !needsApproval(name)) continue;
 			if (ctx.hasUI) {
 				const what = !now ? "deleted" : !was ? "created" : "changed";
-				const d = countChanges(text(was), text(now));
-				const ok = await reviewChange(ctx, {
-					title: `${name} was ${what} without approval (+${d.added}/−${d.removed} lines). Keep?`,
-					before: text(was),
-					after: text(now),
-				});
-				if (ok) {
-					if (now) baseline.set(name, now);
-					else baseline.delete(name);
+				const [before, after] = [text(was), text(now)];
+				const title = `${name} was ${what} without approval (${changeSummary(before, after)}). Keep?`;
+				if (await reviewChange(ctx, title, contentDiff(before, after))) {
+					setBaseline(name, now);
 					continue;
 				}
 			}
@@ -437,6 +411,12 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	const fail = (text: string, details: Record<string, unknown>) => ({
+		content: [{ type: "text" as const, text }],
+		details: { failures, ...details },
+		isError: true,
+	});
+
 	pi.registerTool({
 		name: "check",
 		label: "Check",
@@ -462,30 +442,14 @@ export default function (pi: ExtensionAPI) {
 					notes.push(`Guarded files were changed without the user's approval and have been reverted: ${reverted.join(", ")}.`);
 				}
 				if (failed.length) notes.push(`Guarded files were changed and could not be restored: ${failed.join("; ")}.`);
-				return {
-					content: [{ type: "text", text: `${notes.join(" ")} The check did not run. ${tellUser}` }],
-					details: { exitCode: null, failures, reverted },
-					isError: true,
-				};
+				return fail(`${notes.join(" ")} The check did not run. ${tellUser}`, { exitCode: null, reverted });
 			}
 
 			const file = resolve(ctx.cwd, CHECK_FILE);
-			if (!(await readState(file))) {
-				return {
-					content: [{ type: "text", text: `${CHECK_FILE} not found in ${ctx.cwd}.` }],
-					details: { exitCode: null, failures },
-					isError: true,
-				};
-			}
+			if (!(await readState(file))) return fail(`${CHECK_FILE} not found in ${ctx.cwd}.`, { exitCode: null });
 
 			const result = await pi.exec("bash", [file], { cwd: ctx.cwd, signal });
-			if (result.killed && signal?.aborted) {
-				return {
-					content: [{ type: "text", text: "Check cancelled." }],
-					details: { exitCode: result.code, failures },
-					isError: true,
-				};
-			}
+			if (result.killed && signal?.aborted) return fail("Check cancelled.", { exitCode: result.code });
 
 			const output = [result.stdout, result.stderr].filter((s) => s.trim()).join("\n");
 			const t = truncateTail(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
@@ -507,12 +471,7 @@ export default function (pi: ExtensionAPI) {
 				out += `\n\n${stopReason()}`;
 				if (ctx.hasUI) ctx.ui.notify(`check.sh failed ${failures} times in a row; agent stopped.`, "warning");
 			}
-			return {
-				content: [{ type: "text", text: out }],
-				details: { exitCode: result.code, failures },
-				isError: true,
-				terminate: stopped,
-			};
+			return { ...fail(out, { exitCode: result.code }), terminate: stopped };
 		},
 	});
 
@@ -520,34 +479,35 @@ export default function (pi: ExtensionAPI) {
 		if (stopped) return { block: true, reason: stopReason(), terminate: true };
 		if (!isToolCallEventType("write", event) && !isToolCallEventType("edit", event)) return undefined;
 
-		const s = stateFor(ctx);
-		const name = await guardedTarget(ctx.cwd, await s.config, event.input.path);
+		const name = await guardedTarget(ctx.cwd, config, event.input.path);
 		// Unguarded, or a guarded file that is not in the baseline (new files are free).
-		if (name === undefined || !((await s.baseline).has(name) || isAlwaysGuarded(name))) return undefined;
+		if (name === undefined || !needsApproval(name)) return undefined;
 
-		const before = text(await readState(resolve(ctx.cwd, name))).replace(/\r\n/g, "\n");
-		let review: Review;
+		const before = lf(text(await readState(resolve(ctx.cwd, name))));
+		let title: string;
+		let diff: DiffFn;
 		if (isToolCallEventType("write", event)) {
 			const after = event.input.content;
-			const d = countChanges(before, after);
-			review = { title: `Allow write ${name}? (+${d.added}/−${d.removed} lines)`, before, after };
+			title = `Allow write ${name}? (${changeSummary(before, after)})`;
+			diff = contentDiff(before, after);
 		} else {
 			const edits = event.input.edits;
 			const after = applyEdits(before, edits);
 			const n = `${edits.length} edit${edits.length === 1 ? "" : "s"}`;
 			if (after !== undefined) {
-				const d = countChanges(before, after);
-				review = { title: `Allow edit ${name}? (${n}, +${d.added}/−${d.removed} lines)`, before, after };
+				title = `Allow edit ${name}? (${n}, ${changeSummary(before, after)})`;
+				diff = contentDiff(before, after);
 			} else {
 				// oldText does not match exactly: show each replacement on its own (the edit tool may still fuzzy-match).
-				const rawDiff = edits
+				const raw = edits
 					.map((e, i) => `Edit ${i + 1}/${edits.length}\n${generateDiffString(e.oldText, e.newText, 2).diff}`)
 					.join("\n\n");
-				review = { title: `Allow edit ${name}? (${n})`, before: "", after: "", rawDiff };
+				title = `Allow edit ${name}? (${n})`;
+				diff = () => raw;
 			}
 		}
 
-		if (ctx.hasUI && (await reviewChange(ctx, review))) {
+		if (ctx.hasUI && (await reviewChange(ctx, title, diff))) {
 			approved.set(event.toolCallId, name);
 			return undefined;
 		}
@@ -559,10 +519,7 @@ export default function (pi: ExtensionAPI) {
 		const name = approved.get(event.toolCallId);
 		if (name === undefined) return undefined;
 		approved.delete(event.toolCallId);
-		const baseline = await stateFor(ctx).baseline;
-		const now = await readState(resolve(ctx.cwd, name));
-		if (now) baseline.set(name, now);
-		else baseline.delete(name);
+		setBaseline(name, await readState(resolve(ctx.cwd, name)));
 		return undefined;
 	});
 }
