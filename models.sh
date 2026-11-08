@@ -6,7 +6,7 @@
 #
 # Roles:
 #   strong    .pi/settings.json (defaultProvider/defaultModel), /solo, /discuss, oracle, reviewer
-#   standard  /advised, /fanout
+#   standard  /advised, /fanout, /quick
 #   fast      scout
 #
 # Model IDs are written into each file (pi and its packages read them there); this script keeps
@@ -30,6 +30,7 @@ files=(
 	strong:.pi/agents/reviewer.md
 	standard:.pi/prompts/advised.md
 	standard:.pi/prompts/fanout.md
+	standard:.pi/prompts/quick.md
 	fast:.pi/agents/scout.md
 )
 

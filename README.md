@@ -13,6 +13,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
 - `.pi/prompts/`: the `/solo` (strong model alone) and `/advised` (standard model with a strong-model `oracle` advisor) ticket commands, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
+- `.pi/prompts/quick.md`: `/quick` (standard model) for small changes: no `SPEC.md` and no approval stop (it states a short plan instead), and the review runs only if you ask for one. In a tickets file (`## ticket: <slug> quick`) it runs without stopping for approval
 
 ## Usage
 
@@ -63,12 +64,12 @@ This is a tripwire, not a sandbox. Deliberate dodges still work: clearing `BASH_
 
 ## Models
 
-Pi and its packages read the model from each file (`.pi/settings.json`, the prompts' and agents' `model:` frontmatter), so the IDs are written in eight places. `models.sh` keeps them in step by role:
+Pi and its packages read the model from each file (`.pi/settings.json`, the prompts' and agents' `model:` frontmatter), so the IDs are written in nine places. `models.sh` keeps them in step by role:
 
 | Role | Files |
 |---|---|
 | `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/solo`, `/discuss`, `oracle`, `reviewer` |
-| `standard` | `/advised`, `/fanout` |
+| `standard` | `/advised`, `/fanout`, `/quick` |
 | `fast` | `scout` |
 
 ```sh

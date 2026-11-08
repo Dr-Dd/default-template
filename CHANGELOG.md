@@ -12,6 +12,9 @@ predate this file and count as `1.0.0`...`13.0.0`.
   as a failing check. Before, a hanging check ran forever.
 - `models.sh`: list or switch the models of `.pi/settings.json`, the prompts and the agents by role
   (`strong`, `standard`, `fast`) instead of editing eight files.
+- `/quick`: small changes on the standard model. It follows AGENTS.md but writes no `SPEC.md`
+  and does not stop for approval (it states a short plan instead); the review runs only if you ask
+  for one, with the plan in `.review/spec.md` as the spec.
 
 ### Changed
 
