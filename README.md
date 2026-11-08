@@ -126,3 +126,7 @@ Releases are git tags `vMAJOR.MINOR.PATCH` (semver), listed in [CHANGELOG.md](CH
 
 - **Run ticket sessions in an isolated environment.** Ticket sessions run `pi --approve` with arbitrary bash and can currently reach the whole home directory (ssh keys, credentials, browser profiles). Plan: a rootless podman container with only the worktree mounted (not distrobox, which shares `$HOME`), tmux inside it, and a `tickets.sh` launcher for it. To solve first: logins inside the container (the Claude CLI used by `pi-claude-code`; narrow git credentials, no personal ssh keys), getting branches out (push from the container or share the git directory), and each project's `check.sh` toolchain in the image. Later, the same setup could move to a VM or remote box.
 - **Trial herdr as the ticket session host.** Try [herdr](https://herdr.dev) (`herdr integration install pi`) for a real batch of tickets, with `[update] version_check = false` and `manifest_check = false` in its config. If it stays, add a `herdr` launcher to `tickets.sh` (one tab per ticket via `herdr tab create --cwd ... --label ...`; first confirm how the CLI starts a command in a new tab). Then `~/.pi/agent/extensions/tmux-status.ts` is no longer needed for tickets.
+
+## License
+
+[WTFPL](LICENSE). The license covers this template repository only; `copier copy` does not add it to your project.
