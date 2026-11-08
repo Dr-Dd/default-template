@@ -2,10 +2,10 @@
 
 A skeleton template, not a standalone project. It gives new or existing repositories a common baseline:
 
-- `AGENTS.md`: agent instructions
+- `AGENTS.md`: agent instructions. If you also keep a global `~/.pi/agent/AGENTS.md`, pi loads it next to this one
 - `.gitignore`: common ignore rules
 - `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until you replace its placeholder steps with the project's commands
-- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh`, stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
+- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh`, stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; `/advised` assumes the default of 3; your next message resets the count), blocks bash commands that run `check.sh` (so the limit and the guard cannot be skipped), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected. Not overwritten by `copier update`
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`) and subagent settings that `AGENTS.md` and the prompts rely on
 - `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses, and the `oracle` advisor used by `/advised`
@@ -37,7 +37,7 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 - `.pi/check-guard.json` and the extension itself are always guarded, and creating them needs approval too.
 - The baseline is the guarded files as they were when the session started or when you last sent a message while the agent was idle. Your own edits between runs become the new baseline.
 - Only guarded files committed in `HEAD` are in the baseline ("frozen"). A ticket's new test files stay editable until you commit them, then they are frozen like the rest. Without a commit (or outside git) every existing guarded file is frozen.
-- `write` and `edit` ask before changing a guarded file and show the full diff. Changes made any other way (bash, a background process, a symlink, a test run that rewrites fixtures) are caught by a check of every guarded file against the baseline. It runs before each `check` run and when the agent stops. You approve or deny each change; denied changes are reverted, and a `check` run with a denied change fails without running `check.sh`.
+- `write` and `edit` ask before changing a guarded file and show the full diff. Changes made any other way (bash, a background process, a symlink, a test run that rewrites fixtures) are caught by a check of every guarded file against the baseline. It runs before each `check` run and when the agent stops. You approve or deny each change; denied changes are reverted, and a `check` run with a denied change fails without running `check.sh`. Changes reverted when the agent stops are reported to the model with your next message.
 - The config is read at session start and on each of your messages. If it is unreadable or invalid, the default (`check.sh`) stays guarded and pi shows a warning.
 
 Limits: the guard protects the text of existing files, not their behaviour. New files can still change how existing tests run, e.g. a new `conftest.py` that overrides a fixture, a monkeypatch in a new test file, or a special case in the code under test. A change made through bash is caught at the next check or at the end of the run, not right away. Review those.

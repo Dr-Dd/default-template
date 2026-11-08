@@ -4,6 +4,7 @@
  *
  * - `check` tool: runs ./check.sh and reports its exit code to pi. After PI_CHECK_MAX_FAILURES
  *   (default 3) failing runs in a row, the agent is stopped until the user sends a new message.
+ *   bash calls that run check.sh are blocked, so the failure limit and the gate cannot be skipped.
  * - Guarded files (globs in .pi/check-guard.json `guardedFiles`, plus the config and this
  *   extension) are compared with a baseline: their content when the session started or when the
  *   user last sent a message while the agent was idle. Only files committed in HEAD at that point
@@ -16,6 +17,7 @@
  *     rewrite fixtures) is caught by a gate that compares all guarded files with the baseline
  *     before each check run and when the agent stops. Each unapproved change is shown to the
  *     user; a denied change is reverted to the baseline. A check run with a denied change fails.
+ *     Changes reverted when the agent stops are reported to the model with the user's next message.
  *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles the whole file).
  *   PI_CHECK_DIFF_CONTEXT sets the context lines (default 4).
  */
@@ -45,6 +47,15 @@ const CONFIG_FILE = ".pi/check-guard.json";
 const DEFAULT_GUARDED: readonly string[] = ["check.sh"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
+/**
+ * A bash command that runs check.sh: the script in command position (after the start or a
+ * separator, env assignments and wrappers like bash/sh/exec/env/time/timeout). Mentions such as
+ * `cat check.sh` or `git diff check.sh` do not match. A heuristic, not a sandbox.
+ */
+const RUNS_CHECK =
+	/(?:^|[;&|(`\n]|\$\()\s*(?:(?:[A-Za-z_]\w*=\S*|env|exec|time|nohup|command|sudo|source|\.|timeout\s+\S+|(?:ba|z|da)?sh)\s+(?:-\S+\s+)*)*['"]?(?:\S*\/)?check\.sh(?=$|[\s;&|)`'"])/;
+/** customType of the message that tells the model about changes reverted at the end of a run. */
+const REVERT_MESSAGE = "check-guard-reverted";
 /** Directories never searched for guarded files. */
 const GLOB_SKIP_DIRS = new Set([".git", "node_modules", ".venv", "venv", ".tox", "__pycache__"]);
 /** Integer environment variable that is at least `min`, else `fallback`. */
@@ -404,11 +415,29 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Last chance to catch changes no write/edit asked about, before the user reads the result.
+	// The model has already finished, so what was reverted reaches it with the user's next message:
+	// a custom message without triggerTurn is saved to the session when the run ends (unlike
+	// deliverAs "nextTurn", which is held in memory and lost if pi exits before the next prompt).
+	// Side effect: the notice becomes the session's last message, so `pi -p` (which prints only a
+	// final assistant message) prints nothing for such a run. Use `--mode json` to see the notice.
 	pi.on("agent_end", async (_event, ctx) => {
-		const { reverted } = await gate(ctx);
+		const { reverted, failed } = await gate(ctx);
 		if (reverted.length && ctx.hasUI) {
 			ctx.ui.notify(`check-guard reverted unapproved changes to ${reverted.join(", ")}`, "warning");
 		}
+		if (!reverted.length && !failed.length) return;
+		const notes: string[] = [];
+		if (reverted.length) {
+			notes.push(
+				`At the end of your last run, guarded files you changed without the user's approval were reverted: ${reverted.join(", ")}. ` +
+					"Your changes to them are gone.",
+			);
+		}
+		if (failed.length) notes.push(`Guarded files were changed and could not be restored: ${failed.join("; ")}.`);
+		pi.sendMessage(
+			{ customType: REVERT_MESSAGE, content: `${notes.join(" ")} ${tellUser}`, display: true, details: { reverted, failed } },
+			{ triggerTurn: false },
+		);
 	});
 
 	const fail = (text: string, details: Record<string, unknown>) => ({
@@ -423,15 +452,6 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Run the project check (./check.sh: tests, type checks, linters and whatever else the project configured). " +
 			"Fails with the output of every failing step.",
-		promptSnippet: "Run the project check (./check.sh)",
-		promptGuidelines: [
-			"Use the check tool to run the project check; do not run check.sh through bash.",
-			"A change is done only when the check tool passes.",
-			"Changing or deleting committed guarded files (check.sh and the files listed in .pi/check-guard.json, " +
-				"typically tests, fixtures and test configuration) needs the user's approval. New files, and new files " +
-				"you created in this task that are not committed yet, are free: put new tests in new files. " +
-				"Changes made any other way than write/edit are reverted unless the user approves them.",
-		],
 		parameters: Type.Object({}),
 		executionMode: "sequential",
 		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
@@ -477,6 +497,14 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (stopped) return { block: true, reason: stopReason(), terminate: true };
+		if (isToolCallEventType("bash", event) && RUNS_CHECK.test(event.input.command)) {
+			return {
+				block: true,
+				reason:
+					`Do not run ${CHECK_FILE} through bash: use the check tool. ` +
+					"Bash runs skip its failure limit and guarded-file check.",
+			};
+		}
 		if (!isToolCallEventType("write", event) && !isToolCallEventType("edit", event)) return undefined;
 
 		const name = await guardedTarget(ctx.cwd, config, event.input.path);

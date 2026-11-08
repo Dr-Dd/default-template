@@ -4,8 +4,8 @@
   "defaultThinkingLevel": "medium",
   "packages": [
     "https://github.com/earendil-works/pi-claude-code",
-    "npm:pi-subagents",
-    "npm:pi-prompt-template-model"
+    { "source": "npm:pi-subagents", "prompts": [], "skills": ["!council-mode"] },
+    { "source": "npm:pi-prompt-template-model", "skills": [] }
   ],
   "subagents": {
     "disableBuiltins": true
