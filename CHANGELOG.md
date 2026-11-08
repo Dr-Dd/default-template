@@ -3,7 +3,7 @@
 Releases follow [semver](https://semver.org) (see Versioning in README.md). Tags `v1`...`v13`
 predate this file and count as `1.0.0`...`13.0.0`.
 
-## v15.0.0 (unreleased)
+## v15.0.0 (2026-11-08)
 
 ### Breaking
 
