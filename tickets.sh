@@ -5,13 +5,14 @@
 #   ./tickets.sh list
 #   ./tickets.sh remove SLUG      (after you merged it: removes worktree and branch)
 #
-# FILE (or stdin with "-") holds one ticket per "## <slug> [prompt]" heading; the text below the heading
-# (up to the next "## ") is the ticket:
+# FILE (or stdin with "-") holds one ticket per "## ticket: <slug> [prompt]" line; the text below it
+# (up to the next "## ticket:" line) is the ticket. Other lines, including "## " headings, are
+# ticket text:
 #
-#   ## fix-login
+#   ## ticket: fix-login
 #   Login fails when the email has uppercase letters. ...
 #
-#   ## csv-export advised
+#   ## ticket: csv-export advised
 #   Add CSV export to the reports page. ...
 #
 # For each ticket this creates branch ticket/<slug> from --base (default HEAD) in
@@ -79,18 +80,18 @@ parse_tickets() {
 		fi
 	}
 	while IFS= read -r line || [[ -n $line ]]; do
-		if [[ $line =~ ^##[[:space:]]+([^[:space:]]+)([[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]]; then
+		if [[ $line =~ ^##[[:space:]]+ticket:[[:space:]]*([^[:space:]]+)([[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]]; then
 			flush
 			slug=${BASH_REMATCH[1]} prompt=${BASH_REMATCH[3]:-$default_prompt} body="" in_ticket=1
 			valid_slug "$slug" || die "invalid slug '$slug' (use lowercase letters, digits, . _ -)"
 		elif ((in_ticket)); then
 			body+="$line"$'\n'
 		elif [[ -n ${line//[[:space:]]/} ]]; then
-			die "text before the first '## <slug>' heading in $label"
+			die "text before the first '## ticket: <slug>' line in $label"
 		fi
 	done <"$file"
 	flush
-	((${#slugs[@]})) || die "no tickets found in $label (expected '## <slug>' headings)"
+	((${#slugs[@]})) || die "no tickets found in $label (expected '## ticket: <slug>' lines)"
 
 	local i j
 	for i in "${!slugs[@]}"; do

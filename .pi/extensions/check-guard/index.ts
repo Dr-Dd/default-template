@@ -15,7 +15,8 @@
  *   - write/edit on a guarded file ask first, with the full diff.
  *   - Every other way of changing files (bash, background processes, symlinks, test runs that
  *     rewrite fixtures) is caught by a gate that compares all guarded files with the baseline
- *     before each check run and when the agent stops. Each unapproved change is shown to the
+ *     before each check run and when the agent settles (agent_before_settle, or agent_settled for
+ *     an aborted run, which skips agent_before_settle). Each unapproved change is shown to the
  *     user; a denied change is reverted to the baseline. A check run with a denied change fails.
  *     Changes reverted when the agent stops are reported to the model with the user's next message.
  *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles the whole file).
@@ -44,7 +45,7 @@ const CHECK_FILE = "check.sh";
 /** Per-project configuration (relative to the project root). */
 const CONFIG_FILE = ".pi/check-guard.json";
 /** guardedFiles when there is no config file. */
-const DEFAULT_GUARDED: readonly string[] = ["check.sh"];
+const DEFAULT_GUARDED: readonly string[] = ["check.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
 /**
@@ -409,23 +410,24 @@ export default function (pi: ExtensionAPI) {
 			stopped = false;
 		}
 		// Between runs the baseline moves to the current state, which includes the user's own edits
-		// (agent_end already reconciled the agent's). Messages sent while the agent works do not move it.
+		// (the end-of-run gate already reconciled the agent's). Messages sent while the agent works do not move it.
 		if (!event.streamingBehavior) await refreshState(ctx);
 		return { action: "continue" };
 	});
 
-	// Last chance to catch changes no write/edit asked about, before the user reads the result.
-	// The model has already finished, so what was reverted reaches it with the user's next message:
-	// a custom message without triggerTurn is saved to the session when the run ends (unlike
-	// deliverAs "nextTurn", which is held in memory and lost if pi exits before the next prompt).
-	// Side effect: the notice becomes the session's last message, so `pi -p` (which prints only a
-	// final assistant message) prints nothing for such a run. Use `--mode json` to see the notice.
-	pi.on("agent_end", async (_event, ctx) => {
+	/**
+	 * Last chance to catch changes no write/edit asked about, before the user reads the result.
+	 * Returns the notice for the model (undefined if nothing was reverted or failed). The model has
+	 * already finished, so the notice is saved to the session and reaches it with the user's next
+	 * message. Side effect: the notice becomes the session's last message, so `pi -p` (which prints
+	 * only a final assistant message) prints nothing for such a run. Use `--mode json` to see it.
+	 */
+	const endOfRunGate = async (ctx: ExtensionContext) => {
 		const { reverted, failed } = await gate(ctx);
 		if (reverted.length && ctx.hasUI) {
 			ctx.ui.notify(`check-guard reverted unapproved changes to ${reverted.join(", ")}`, "warning");
 		}
-		if (!reverted.length && !failed.length) return;
+		if (!reverted.length && !failed.length) return undefined;
 		const notes: string[] = [];
 		if (reverted.length) {
 			notes.push(
@@ -434,10 +436,28 @@ export default function (pi: ExtensionAPI) {
 			);
 		}
 		if (failed.length) notes.push(`Guarded files were changed and could not be restored: ${failed.join("; ")}.`);
-		pi.sendMessage(
-			{ customType: REVERT_MESSAGE, content: `${notes.join(" ")} ${tellUser}`, display: true, details: { reverted, failed } },
-			{ triggerTurn: false },
-		);
+		return {
+			customType: REVERT_MESSAGE,
+			content: `${notes.join(" ")} ${tellUser}`,
+			display: true,
+			details: { reverted, failed },
+		};
+	};
+
+	// Once per run, after retries, compaction retries and queued messages (agent_end fires for each
+	// of those). The notice is added as a session entry; no extra turn is requested.
+	pi.on("agent_before_settle", async (event, ctx) => {
+		const notice = await endOfRunGate(ctx);
+		return notice ? { entries: [...event.entries, { type: "custom_message", ...notice }] } : undefined;
+	});
+
+	// An aborted run (Esc) skips agent_before_settle: gate it here, or the user's next message would
+	// take the agent's changes into the baseline unseen. After a normal run this finds nothing.
+	pi.on("agent_settled", async (event, ctx) => {
+		if (!event.aborted) return;
+		const notice = await endOfRunGate(ctx);
+		// The agent is idle: without triggerTurn the message is saved now and starts no turn.
+		if (notice) pi.sendMessage(notice, { triggerTurn: false });
 	});
 
 	const fail = (text: string, details: Record<string, unknown>) => ({
