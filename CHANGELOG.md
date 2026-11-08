@@ -6,6 +6,28 @@ pre-1.0: anything may change in any release, and breaking changes bump the minor
 The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The entries below
 `v0.15.0` keep the old numbering of the deleted tags and are history only.
 
+## Unreleased
+
+### Breaking
+
+- check-guard: the `subagent` tool is allowlisted instead of blocklisted. Only the actions
+  `status`, `interrupt`, `stop`, `list`, `get` and `guide` are allowed; all others (including
+  `resume`, schedules and agent management) are blocked. A direct launch may only start `scout`,
+  `reviewer` or `oracle`, one per call (`workflow`, `tasks` and `chain` are blocked). Projects
+  with their own agents must add them to `ALLOW_SUBAGENT_AGENTS` in the extension. This replaces
+  the agent-management blocklist and launch gating of v0.15.0: allowed actions skip the gate,
+  launches keep it.
+
+### Added
+
+- check-guard: `Shift+A` also applies the multi-file approval dialog, like `Shift+Enter`.
+- check-guard: `vulnerableFiles` in `.pi/check-guard.json` (default `.pi/npm`, `.pi/git`): globs
+  that are not guarded at all, even when `strictFiles` or `guardedFiles` match them. The config
+  and the extension cannot be exempted.
+- `check.sh`: new `guarded-files` step that fails while `guardedFiles` in `.pi/check-guard.json`
+  is missing or empty, so a project has to list its tests and fixtures. Existing projects with
+  their own `check.sh` are unaffected; `copier update` does not overwrite it.
+
 ## v0.15.0 (2026-11-08)
 
 ### Breaking

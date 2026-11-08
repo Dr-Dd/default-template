@@ -54,3 +54,6 @@ Planned work and follow-ups for the template itself. Kept out of the generated p
   `$wt_root/.logs/<timestamp>.log`: the tickets, base, launcher, every git/tmux command and its
   output, and which tickets started. Keep it outside the worktrees (they are removed) and
   outside the repository; mention its path in the failure summary.
+
+- **Enforce good guarding.** Force the default template state for guarding to halt the `AGENTS.md`;
+  find a way to force the user to build and extend the default guarded paths by himself.

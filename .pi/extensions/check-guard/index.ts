@@ -58,7 +58,7 @@ const CONFIG_FILE = ".pi/check-guard.json";
 /** checkTimeoutSeconds when the config does not set it. */
 const DEFAULT_CHECK_TIMEOUT = 600;
 /** Keys .pi/check-guard.json may contain; others are reported. */
-const CONFIG_KEYS: readonly string[] = ["guardedFiles", "strictFiles", "checkTimeoutSeconds"];
+const CONFIG_KEYS: readonly string[] = ["guardedFiles", "strictFiles", "vulnerableFiles", "checkTimeoutSeconds"];
 /** Grace period between SIGTERM and SIGKILL when the check is stopped. */
 const KILL_GRACE_MS = 5000;
 /** How long to keep reading output after check.sh exits. */
@@ -67,17 +67,18 @@ const PIPE_GRACE_MS = 1000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** strictFiles when the config does not set them: the check, the worktree setup and the agent's own instructions. */
 const DEFAULT_STRICT: readonly string[] = ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"];
+/** vulnerableFiles when the config does not set them: pi's installed packages, which pi itself rewrites. */
+const DEFAULT_VULNERABLE: readonly string[] = [".pi/npm", ".pi/git"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
-// subagent actions that create, change or remove agent definitions or their settings. They write
-// agent files from inside the subagent tool, so the write/edit approval never sees them.
-const AGENT_MANAGEMENT = new Set([
-	"create", "update", "delete", "eject", "disable", "enable", "reset", "refine", "refine.rollback",
-]);
+// Subagent actions that start no child run (read-only, status, or control of a running child).
+// Any other action is blocked. A call without an action is a direct launch, validated separately.
+const ALLOWED_SUBAGENT_ACTIONS = new Set(["status", "interrupt", "stop", "list", "get", "guide"]);
 
-// subagent actions known to start no child run. Any other call (no action, resume, schedule.create,
-// an action added by a later pi-subagents) may start children that read the guarded agent files.
-const NO_LAUNCH = new Set(["status", "list", "guide", "children.list", "models", "doctor", "validate", "refine.show"]);
+// Agents the workflow uses for direct launches.
+const ALLOW_SUBAGENT_AGENTS = new Set(["scout", "reviewer", "oracle"]);
+// Fields that make a call launch other or several agents (scripts, parallel tasks, chains).
+const SUBAGENT_MULTI_LAUNCH_FIELDS: readonly string[] = ["workflow", "tasks", "chain"];
 
 /**
  * A bash command that runs check.sh: the script in command position (after the start or a
@@ -117,13 +118,15 @@ type Config = {
 	guarded: string[];
 	/** Strict: always frozen, and creating a file needs approval too. */
 	strict: string[];
+	/** Never guarded, even if strict or guarded globs match them (a directory covers its contents). */
+	vulnerable: string[];
 	/** Seconds before a check run is stopped; 0 means no timeout. */
 	checkTimeout: number;
 	/** Problems found while reading the config (shown to the user). */
 	errors: string[];
 };
 
-const defaultConfig = (): Config => ({ guarded: [], strict: [...DEFAULT_STRICT], checkTimeout: DEFAULT_CHECK_TIMEOUT, errors: [] });
+const defaultConfig = (): Config => ({ guarded: [], strict: [...DEFAULT_STRICT], vulnerable: [...DEFAULT_VULNERABLE], checkTimeout: DEFAULT_CHECK_TIMEOUT, errors: [] });
 
 /** Read CONFIG_FILE. Problems never weaken protection: an unreadable config keeps the defaults. */
 async function loadConfig(cwd: string): Promise<Config> {
@@ -154,7 +157,7 @@ async function loadConfig(cwd: string): Promise<Config> {
 			cfg.errors.push(`${CONFIG_FILE}: unknown key "${key}" is ignored (known keys: ${CONFIG_KEYS.join(", ")})`);
 		}
 	}
-	for (const [key, field] of [["guardedFiles", "guarded"], ["strictFiles", "strict"]] as const) {
+	for (const [key, field] of [["guardedFiles", "guarded"], ["strictFiles", "strict"], ["vulnerableFiles", "vulnerable"]] as const) {
 		if (obj[key] === undefined) continue;
 		const g = globs(obj[key]);
 		// matchesGlob does not match a leading "./" against relative paths, so drop it.
@@ -174,14 +177,22 @@ async function loadConfig(cwd: string): Promise<Config> {
 }
 
 const allGlobs = (cfg: Config) => [...ALWAYS_GUARDED, ...cfg.strict, ...cfg.guarded];
-const isGuarded = (cfg: Config, rel: string) => allGlobs(cfg).some((g) => matchesGlob(rel, g));
+/**
+ * Listed in vulnerableFiles (or inside a listed directory): not guarded at all. The config and the
+ * extension cannot be made vulnerable, or the guard could be switched off through its own config.
+ */
+const isVulnerable = (cfg: Config, rel: string) =>
+	!ALWAYS_GUARDED.some((g) => matchesGlob(rel, g)) &&
+	cfg.vulnerable.some((g) => matchesGlob(rel, g) || matchesGlob(rel, `${g.replace(/\/+$/, "")}/**`));
+const isGuarded = (cfg: Config, rel: string) =>
+	!isVulnerable(cfg, rel) && allGlobs(cfg).some((g) => matchesGlob(rel, g));
 /**
  * Guarded files that are frozen even when new, so creating them needs approval too: the config,
  * the extension, and every file matched by strictFiles. Files matched only by guardedFiles
  * (`tests/**`) are frozen once committed, so a ticket can add new ones freely.
  */
 const isAlwaysGuarded = (cfg: Config, rel: string) =>
-	[...ALWAYS_GUARDED, ...cfg.strict].some((g) => matchesGlob(rel, g));
+	!isVulnerable(cfg, rel) && [...ALWAYS_GUARDED, ...cfg.strict].some((g) => matchesGlob(rel, g));
 
 // ---------------------------------------------------------------- files
 
@@ -236,9 +247,10 @@ function committedFiles(cwd: string): Promise<Set<string> | undefined> {
 async function snapshot(cwd: string, cfg: Config, sticky?: ReadonlySet<string>): Promise<Snapshot> {
 	const snap: Snapshot = new Map();
 	const committed = sticky && (await committedFiles(cwd));
-	const exclude = (p: string) => p.split(/[\\/]/).some((part) => GLOB_SKIP_DIRS.has(part));
+	const exclude = (p: string) => p.split(/[\\/]/).some((part) => GLOB_SKIP_DIRS.has(part)) || isVulnerable(cfg, p.split(sep).join("/"));
 	for await (const rel of glob(allGlobs(cfg), { cwd, exclude })) {
 		const name = rel.split(sep).join("/");
+		if (isVulnerable(cfg, name)) continue;
 		if (committed && !committed.has(name) && !sticky!.has(name) && !isAlwaysGuarded(cfg, name)) continue;
 		const st = await readState(resolve(cwd, name));
 		if (st) snap.set(name, st);
@@ -615,7 +627,7 @@ async function reviewBatch(ctx: ExtensionContext, title: string, items: BatchIte
 					: theme.fg("accent", theme.bold("press shift+enter to apply"));
 				const pos = all.length > h ? `[${top + 1}-${top + Math.min(h, all.length - top)}/${all.length}] ` : "";
 				const help =
-					`${pos}↑↓ move · enter keep/discard · tab diff · shift+v keep all · shift+x discard all · shift+enter apply · ` +
+					`${pos}↑↓ move · enter keep/discard · tab diff · shift+v keep all · shift+x discard all · shift+enter/shift+a apply · ` +
 					`pgup/pgdn/home/end/wheel scroll · c ${full ? "changes only" : "whole file"}`;
 				return [
 					truncateToWidth(theme.fg("warning", theme.bold(title)), width),
@@ -633,7 +645,7 @@ async function reviewBatch(ctx: ExtensionContext, title: string, items: BatchIte
 				// Checked before Enter so a user keybinding that maps confirm to shift+enter cannot toggle.
 				// Needs a terminal that reports Shift+Enter (Kitty protocol, xterm modifyOtherKeys, tmux
 				// with extended-keys); otherwise it arrives as plain Enter.
-				if (matchesKey(data, "shift+enter")) {
+				if (matchesKey(data, "shift+enter") || matchesKey(data, "shift+a")) {
 					if (decision.every((d) => d !== undefined)) done(decision as boolean[]);
 					return;
 				}
@@ -889,14 +901,31 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		if (stopped) return { block: true, reason: stopReason(), terminate: true };
 		if (event.toolName === "subagent") {
-			const action = (event.input as { action?: unknown }).action;
-			if (typeof action === "string" && AGENT_MANAGEMENT.has(action.trim().toLowerCase())) {
+			const input = event.input as Record<string, unknown>;
+			const action = typeof input.action === "string" ? input.action.trim().toLowerCase() : "";
+			if (action) {
+				// Allowed actions start no child, so they need neither the sibling rule nor the gate.
+				if (ALLOWED_SUBAGENT_ACTIONS.has(action)) return undefined;
 				return {
 					block: true,
-					reason: `Agent management (subagent action "${action}") is not allowed: agent definitions are guarded. ${tellUser}`,
+					reason: `Subagent action "${input.action}" is not allowed: it is not in the allowlist (${[...ALLOWED_SUBAGENT_ACTIONS].join(", ")}). ${tellUser}`,
 				};
 			}
-			if (typeof action === "string" && NO_LAUNCH.has(action.trim().toLowerCase())) return undefined;
+			// No action: a direct launch. Only the workflow's own agents, one child per call.
+			const agent = typeof input.agent === "string" ? input.agent.trim() : "";
+			if (!ALLOW_SUBAGENT_AGENTS.has(agent)) {
+				return {
+					block: true,
+					reason: `Subagent "${agent || "(none)"}" is not allowed: launch one of ${[...ALLOW_SUBAGENT_AGENTS].join(", ")}. ${tellUser}`,
+				};
+			}
+			const multi = SUBAGENT_MULTI_LAUNCH_FIELDS.filter((f) => input[f] !== undefined && input[f] !== false);
+			if (multi.length) {
+				return {
+					block: true,
+					reason: `Subagent field${multi.length > 1 ? "s" : ""} ${multi.join(", ")} not allowed: launch one agent per call. ${tellUser}`,
+				};
+			}
 			// The tool is not ours, so we cannot make it sequential. Tool calls of one message are
 			// preflighted in order but run together afterwards: a bash edit in the same message would
 			// land after this gate, while the child starts. A launch must be alone in its message.

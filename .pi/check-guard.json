@@ -1,4 +1,7 @@
 {
-  "strictFiles": ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"],
-  "guardedFiles": []
+  "strictFiles": [ "check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json",
+      ".pi/agents/**", ".pi/prompts/**", ".pi/**", ".agents/**", "CLAUDE.md", "tickets.sh",
+      "models.sh",".gitignore"],
+  "guardedFiles": [],
+  "vulnerableFiles": [".pi/npm", ".pi/git"]
 }

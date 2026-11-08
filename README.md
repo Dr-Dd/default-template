@@ -4,7 +4,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 
 - `AGENTS.md`: agent instructions. If you also keep a global `~/.pi/agent/AGENTS.md`, pi loads it next to this one
 - `.gitignore`: common ignore rules
-- `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until you replace its placeholder steps with the project's commands
+- `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until `guardedFiles` in `.pi/check-guard.json` is set (its `guarded-files` step, which needs `node`) and you replace its placeholder steps with the project's commands
 - `worktree-setup.sh`: what a new `tickets.sh` worktree needs that git does not track (installed dependencies, `.env`, ...). It ships unconfigured, like `check.sh`, and `tickets.sh start` refuses to run until you configure it
 - `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
@@ -35,25 +35,33 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 ```json
 {
   "strictFiles": ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"],
-  "guardedFiles": ["pytest.ini", "tests/**", "**/conftest.py"]
+  "guardedFiles": ["pytest.ini", "tests/**", "**/conftest.py"],
+  "vulnerableFiles": [".pi/npm", ".pi/git"]
 }
 ```
 
 - `strictFiles` (default `["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"]`: the check, the worktree setup, the agent's own instructions and the pi files that define agents and prompts): globs relative to the project root. Always protected: changing, deleting or renaming an existing file needs your approval, and so does creating one. Setting it replaces the default, so keep those entries when you add your own. Globs match files: use `dir/**` for everything inside a directory.
 - `guardedFiles` (default `[]`): globs like `strictFiles`, but for files that are protected only once committed in `HEAD`. A new file matched here does not need approval, so the agent can add new test files freely. Use it for tests, fixtures, snapshot files and test runner config. If a file matches both lists, `strictFiles` wins.
+- `vulnerableFiles` (default `[".pi/npm", ".pi/git"]`: pi's installed packages, which pi rewrites itself): globs that are not guarded at all, even if `strictFiles` or `guardedFiles` (or both) match them. A directory covers everything inside it. Use it to carve exceptions out of broad patterns like `.pi/**`. It cannot exempt `.pi/check-guard.json` or the extension.
 - `.pi/check-guard.json` and the extension itself are always strict.
 - The baseline is the guarded files as they were when the session started or when you last sent a message while the agent was idle. Your own edits between runs become the new baseline.
 - Files matched by `guardedFiles` are in the baseline ("frozen") only once committed in `HEAD`. A ticket's new test files stay editable until you commit them, then they are frozen like the rest. Strict files are always frozen. Without a commit (or outside git) every existing guarded file is frozen.
 - `write` and `edit` ask before changing a guarded file and show the full diff. Changes made any other way (bash, a background process, a symlink, a test run that rewrites fixtures) are caught by a check of every guarded file against the baseline. It runs before each `check` run and once when the agent stops, including after you interrupt it with Esc. All changes it finds are shown in one dialog (e.g. 40 rewritten snapshot files are one dialog, not 40). For several files it lists their paths; every file starts undecided:
   - `↑`/`↓` select a file, `Enter` toggles it between keep and discard, `Tab` shows or hides its diff
   - `Shift+V` keeps all, `Shift+X` discards all
-  - `Shift+Enter` applies once every file is decided (`Esc` does nothing, so a stray key cannot answer). Your terminal must report Shift+Enter as its own key: Ghostty, Kitty and other terminals with the Kitty keyboard protocol do; inside tmux set `extended-keys on` (and `extended-keys-format csi-u`)
+  - `Shift+Enter` (or `Shift+A`) applies once every file is decided (`Esc` does nothing, so a stray key cannot answer). Your terminal must report Shift+Enter as its own key: Ghostty, Kitty and other terminals with the Kitty keyboard protocol do; inside tmux set `extended-keys on` (and `extended-keys-format csi-u`)
 
   A single file gets the `y`/`n` dialog with its diff. Discarded changes are reverted, and a `check` run with discarded changes fails without running `check.sh`. Changes reverted when the agent stops are reported to the model with your next message.
 - `checkTimeoutSeconds` (default `600`, `0` for no timeout): a `check` run that takes longer is stopped and counts as a failing check. Stopping kills `check.sh` and every process it started.
 - The config is read at session start and on each of your messages. If it is unreadable or invalid, the default `strictFiles` stay guarded and pi shows a warning. Unknown keys (e.g. a misspelled `strictFiles`) are ignored with a warning.
 
-The `subagent` tool's agent-management actions (`create`, `update`, `delete`, `eject`, `disable`, `enable`, `reset`, `refine`, `refine.rollback`) are blocked outright. A `subagent` call that may start children also runs the guarded-file check first and must be the only tool call of its message; if the check reverts changes, the launch is refused.
+The `subagent` tool is allowlisted in the extension:
+
+- Actions that start no child run are allowed: `status`, `interrupt`, `stop`, `list`, `get`, `guide`. Every other action is blocked, including agent management (`create`, `update`, `delete`, ...), `resume`, schedules and workflow actions.
+- A call without an action is a direct launch. It may only start `scout`, `reviewer` or `oracle`, one agent per call: `workflow`, `tasks` and `chain` are blocked.
+- A launch must be the only tool call of its message, and first runs the guarded-file check. If the check reverts changes, the launch is refused.
+
+The allowed actions and agents are constants at the top of `.pi/extensions/check-guard/index.ts` (`ALLOWED_SUBAGENT_ACTIONS`, `ALLOW_SUBAGENT_AGENTS`). To use other agents, add them there; the extension is always guarded, so this needs your approval.
 
 Limits: the guard protects the text of existing files, not their behaviour. New files can still change how existing tests run, e.g. a new `conftest.py` that overrides a fixture, a monkeypatch in a new test file, or a special case in the code under test. A change made through bash is caught at the next check or at the end of the run, not right away. Review those.
 
