@@ -5,13 +5,14 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `AGENTS.md`: agent instructions. If you also keep a global `~/.pi/agent/AGENTS.md`, pi loads it next to this one
 - `.gitignore`: common ignore rules
 - `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until you replace its placeholder steps with the project's commands
-- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh`, stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (so the limit and the guard cannot be skipped), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
-- `.pi/check-guard.json`: which files are protected. Not overwritten by `copier update`
+- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (so the limit and the guard cannot be skipped), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
+- `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
+- `models.sh`: show or switch the models the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses) and subagent settings that `AGENTS.md` and the prompts rely on
 - `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses, and the `oracle` advisor used by `/advised`
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
-- `.pi/prompts/`: the `/solo` (Opus alone) and `/advised` (Sonnet with an Opus `oracle` advisor) ticket commands, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
+- `.pi/prompts/`: the `/solo` (strong model alone) and `/advised` (standard model with a strong-model `oracle` advisor) ticket commands, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
 
 ## Usage
 
@@ -40,10 +41,33 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 - `.pi/check-guard.json` and the extension itself are always guarded, and creating them needs approval too.
 - The baseline is the guarded files as they were when the session started or when you last sent a message while the agent was idle. Your own edits between runs become the new baseline.
 - Only guarded files committed in `HEAD` are in the baseline ("frozen"). A ticket's new test files stay editable until you commit them, then they are frozen like the rest. Without a commit (or outside git) every existing guarded file is frozen.
-- `write` and `edit` ask before changing a guarded file and show the full diff. Changes made any other way (bash, a background process, a symlink, a test run that rewrites fixtures) are caught by a check of every guarded file against the baseline. It runs before each `check` run and once when the agent stops, including after you interrupt it with Esc. You approve or deny each change; denied changes are reverted, and a `check` run with a denied change fails without running `check.sh`. Changes reverted when the agent stops are reported to the model with your next message.
-- The config is read at session start and on each of your messages. If it is unreadable or invalid, the default list stays guarded and pi shows a warning.
+- `write` and `edit` ask before changing a guarded file and show the full diff. Changes made any other way (bash, a background process, a symlink, a test run that rewrites fixtures) are caught by a check of every guarded file against the baseline. It runs before each `check` run and once when the agent stops, including after you interrupt it with Esc. All changes it finds are shown in one dialog (e.g. 40 rewritten snapshot files are one dialog, not 40). For several files it lists their paths; every file starts undecided:
+  - `↑`/`↓` select a file, `Enter` toggles it between keep and discard, `Tab` shows or hides its diff
+  - `Shift+V` keeps all, `Shift+X` discards all
+  - `Shift+Enter` applies once every file is decided (`Esc` does nothing, so a stray key cannot answer). Your terminal must report Shift+Enter as its own key: Ghostty, Kitty and other terminals with the Kitty keyboard protocol do; inside tmux set `extended-keys on` (and `extended-keys-format csi-u`)
+
+  A single file gets the `y`/`n` dialog with its diff. Discarded changes are reverted, and a `check` run with discarded changes fails without running `check.sh`. Changes reverted when the agent stops are reported to the model with your next message.
+- `checkTimeoutSeconds` (default `600`, `0` for no timeout): a `check` run that takes longer is stopped and counts as a failing check. Stopping kills `check.sh` and every process it started.
+- The config is read at session start and on each of your messages. If it is unreadable or invalid, the default list stays guarded and pi shows a warning. Unknown keys (e.g. a misspelled `guardedFiles`) are ignored with a warning.
 
 Limits: the guard protects the text of existing files, not their behaviour. New files can still change how existing tests run, e.g. a new `conftest.py` that overrides a fixture, a monkeypatch in a new test file, or a special case in the code under test. A change made through bash is caught at the next check or at the end of the run, not right away. Review those.
+
+## Models
+
+Pi and its packages read the model from each file (`.pi/settings.json`, the prompts' and agents' `model:` frontmatter), so the IDs are written in eight places. `models.sh` keeps them in step by role:
+
+| Role | Files |
+|---|---|
+| `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/solo`, `/discuss`, `oracle`, `reviewer` |
+| `standard` | `/advised`, `/fanout` |
+| `fast` | `scout` |
+
+```sh
+./models.sh                                        # each role, its model and files; warns if a role is mixed
+./models.sh set strong claude-code/claude-opus-5-5 # switch every file of a role
+```
+
+The files are guarded, so run it yourself rather than through the agent (or approve the changes when check-guard asks). Prompt and agent descriptions name roles (strong, standard, fast), not models, so they stay correct after a switch.
 
 ## Parallel tickets
 

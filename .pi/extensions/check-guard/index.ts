@@ -16,14 +16,19 @@
  *   - Every other way of changing files (bash, background processes, symlinks, test runs that
  *     rewrite fixtures) is caught by a gate that compares all guarded files with the baseline
  *     before each check run and when the agent settles (agent_before_settle, or agent_settled for
- *     an aborted run, which skips agent_before_settle). Each unapproved change is shown to the
- *     user; a denied change is reverted to the baseline. A check run with a denied change fails.
+ *     an aborted run, which skips agent_before_settle). All unapproved changes found by one gate
+ *     run are shown to the user in one dialog: a list of the files, where each can be kept or
+ *     discarded (reverted to the baseline) and its diff expanded. A check run with discarded
+ *     changes fails.
  *     Changes reverted when the agent stops are reported to the model with the user's next message.
  *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles the whole file).
  *   PI_CHECK_DIFF_CONTEXT sets the context lines (default 4).
+ * - The check is stopped after `checkTimeoutSeconds` (.pi/check-guard.json, default 600; 0 turns
+ *   the timeout off) and counts as a failure. Stopping kills check.sh's whole process group.
+ * - Unknown keys in .pi/check-guard.json are reported to the user (and otherwise ignored).
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { chmod, glob, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";
@@ -44,6 +49,16 @@ import { Type } from "typebox";
 const CHECK_FILE = "check.sh";
 /** Per-project configuration (relative to the project root). */
 const CONFIG_FILE = ".pi/check-guard.json";
+/** checkTimeoutSeconds when the config does not set it. */
+const DEFAULT_CHECK_TIMEOUT = 600;
+/** Keys .pi/check-guard.json may contain; others are reported. */
+const CONFIG_KEYS: readonly string[] = ["guardedFiles", "checkTimeoutSeconds"];
+/** Grace period between SIGTERM and SIGKILL when the check is stopped. */
+const KILL_GRACE_MS = 5000;
+/** How long to keep reading output after check.sh exits. */
+const PIPE_GRACE_MS = 1000;
+/** Output kept from a check run (the tail). */
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** guardedFiles when there is no config file. */
 const DEFAULT_GUARDED: readonly string[] = ["check.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */
@@ -73,13 +88,17 @@ const diffContext = () => envInt("PI_CHECK_DIFF_CONTEXT", 0, 4);
 
 type Config = {
 	guarded: string[];
+	/** Seconds before a check run is stopped; 0 means no timeout. */
+	checkTimeout: number;
 	/** Problems found while reading the config (shown to the user). */
 	errors: string[];
 };
 
+const defaultConfig = (): Config => ({ guarded: [...DEFAULT_GUARDED], checkTimeout: DEFAULT_CHECK_TIMEOUT, errors: [] });
+
 /** Read CONFIG_FILE. Problems never weaken protection: an unreadable config keeps the defaults. */
 async function loadConfig(cwd: string): Promise<Config> {
-	const cfg: Config = { guarded: [...DEFAULT_GUARDED], errors: [] };
+	const cfg = defaultConfig();
 	let raw: string;
 	try {
 		raw = await readFile(resolve(cwd, CONFIG_FILE), "utf8");
@@ -96,11 +115,29 @@ async function loadConfig(cwd: string): Promise<Config> {
 	}
 	const globs = (v: unknown): string[] | undefined =>
 		typeof v === "string" ? [v] : Array.isArray(v) && v.every((s) => typeof s === "string") ? v : undefined;
-	const obj = (json ?? {}) as Record<string, unknown>;
+	if (typeof json !== "object" || json === null || Array.isArray(json)) {
+		cfg.errors.push(`${CONFIG_FILE} must be a JSON object`);
+		return cfg;
+	}
+	const obj = json as Record<string, unknown>;
+	for (const key of Object.keys(obj)) {
+		if (!CONFIG_KEYS.includes(key)) {
+			cfg.errors.push(`${CONFIG_FILE}: unknown key "${key}" is ignored (known keys: ${CONFIG_KEYS.join(", ")})`);
+		}
+	}
 	if (obj.guardedFiles !== undefined) {
 		const g = globs(obj.guardedFiles);
 		if (g) cfg.guarded = g;
 		else cfg.errors.push(`${CONFIG_FILE}: guardedFiles must be a list of globs`);
+	}
+	if (obj.checkTimeoutSeconds !== undefined) {
+		const t = obj.checkTimeoutSeconds;
+		if (typeof t === "number" && Number.isInteger(t) && t >= 0) cfg.checkTimeout = t;
+		else {
+			cfg.errors.push(
+				`${CONFIG_FILE}: checkTimeoutSeconds must be a whole number of seconds (0: no timeout); using ${DEFAULT_CHECK_TIMEOUT}`,
+			);
+		}
 	}
 	return cfg;
 }
@@ -197,6 +234,95 @@ async function guardedTarget(cwd: string, cfg: Config, raw: string): Promise<str
 		if (rel !== undefined && isGuarded(cfg, rel)) return rel;
 	}
 	return undefined;
+}
+
+// ---------------------------------------------------------------- running the check
+
+type CheckResult = {
+	output: string;
+	code: number | null;
+	/** Signal that ended check.sh, if any. */
+	exitSignal: NodeJS.Signals | null;
+	timedOut: boolean;
+	cancelled: boolean;
+};
+
+/**
+ * Run `bash file` in its own process group, so a timeout or cancel stops everything check.sh started
+ * (test runners, servers), not just bash. SIGTERM first, SIGKILL after KILL_GRACE_MS.
+ * `timeoutSeconds` 0 means no timeout.
+ */
+function runCheck(file: string, cwd: string, timeoutSeconds: number, signal?: AbortSignal): Promise<CheckResult> {
+	return new Promise((done) => {
+		const detached = process.platform !== "win32";
+		const proc = spawn("bash", [file], { cwd, detached, stdio: ["ignore", "pipe", "pipe"] });
+		// Keep only the tail: the result is truncated to its last lines anyway.
+		const chunks: Buffer[] = [];
+		let bytes = 0;
+		const onData = (d: Buffer) => {
+			chunks.push(d);
+			bytes += d.length;
+			while (bytes > MAX_OUTPUT_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
+		};
+		proc.stdout.on("data", onData);
+		proc.stderr.on("data", onData);
+
+		let timedOut = false;
+		let cancelled = false;
+		let killTimer: NodeJS.Timeout | undefined;
+		const killGroup = (sig: NodeJS.Signals) => {
+			try {
+				if (detached && proc.pid) process.kill(-proc.pid, sig);
+				else proc.kill(sig);
+			} catch {
+				// Already gone.
+			}
+		};
+		const stop = () => {
+			if (killTimer) return;
+			killGroup("SIGTERM");
+			killTimer = setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS);
+		};
+		const timer =
+			timeoutSeconds > 0
+				? setTimeout(() => {
+						timedOut = true;
+						stop();
+					}, timeoutSeconds * 1000)
+				: undefined;
+		const onAbort = () => {
+			cancelled = true;
+			stop();
+		};
+		if (signal?.aborted) onAbort();
+		else signal?.addEventListener("abort", onAbort, { once: true });
+
+		let settled = false;
+		let exitCode: number | null = null;
+		let exitSignal: NodeJS.Signals | null = null;
+		const finish = (extra = "") => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			clearTimeout(killTimer);
+			signal?.removeEventListener("abort", onAbort);
+			done({ output: Buffer.concat(chunks).toString("utf8") + extra, code: exitCode, exitSignal, timedOut, cancelled });
+		};
+		proc.on("error", (err) => finish(`\n${err.message}`));
+		proc.on("exit", (code, sig) => {
+			exitCode = code;
+			exitSignal = sig;
+			// Leftovers in the group (e.g. a background server) would keep the pipes open: kill them.
+			if (detached) killGroup("SIGKILL");
+			// A descendant that left the group can still hold the pipes; stop waiting for it.
+			setTimeout(() => {
+				proc.stdout.destroy();
+				proc.stderr.destroy();
+				finish();
+			}, PIPE_GRACE_MS).unref();
+		});
+		proc.on("close", () => finish());
+	});
 }
 
 // ---------------------------------------------------------------- diffs and the approval dialog
@@ -331,6 +457,174 @@ async function reviewChange(ctx: ExtensionContext, title: string, diff: DiffFn):
 	}, { overlay: true, overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: 0 } });
 }
 
+/** One file in a batch review. */
+type BatchItem = { name: string; detail: string; diff: DiffFn };
+
+/**
+ * Ask the user to keep or discard each of several changed guarded files. Returns one decision per
+ * item (true: keep).
+ * TUI: full-screen list of the files. ↑↓ move, Enter toggles keep/discard, Tab shows or hides the
+ * file's diff, Shift+V keeps all, Shift+X discards all, Shift+Enter applies once every file is decided
+ * (files start undecided, so a stray keypress cannot answer; Esc does nothing).
+ * Other UIs: one confirm with every diff; the answer applies to all files.
+ */
+async function reviewBatch(ctx: ExtensionContext, title: string, items: BatchItem[]): Promise<boolean[]> {
+	if (ctx.mode !== "tui") {
+		const body = items.map((it) => `=== ${it.name} (${it.detail})\n${it.diff(diffContext())}`).join("\n\n");
+		const keep = await ctx.ui.confirm(`${title}. Keep all?`, body);
+		return items.map(() => keep);
+	}
+
+	return ctx.ui.custom<boolean[]>((tui, theme, keybindings, done) => {
+		const decision: (boolean | undefined)[] = items.map(() => undefined);
+		const expanded: boolean[] = items.map(() => false);
+		let cursor = 0;
+		let top = 0;
+		let full = false;
+		/** Rendered diff lines per item, for diffWidth and the current `full`. */
+		let diffCache: (string[] | undefined)[] = [];
+		let diffWidth = -1;
+		/** Index of each item's header line in the last rendered content. */
+		let headerAt: number[] = [];
+		let contentLength = 0;
+
+		// Title, rule, rule, status line, help line.
+		const CHROME = 5;
+		const INDENT = "    ";
+		const viewHeight = () => Math.max(1, tui.terminal.rows - CHROME);
+		const diffLines = (i: number, width: number): string[] => {
+			if (diffWidth !== width) {
+				diffCache = [];
+				diffWidth = width;
+			}
+			return (diffCache[i] ??= renderDiff(items[i]!.diff(full ? Number.MAX_SAFE_INTEGER : diffContext()))
+				.split("\n")
+				.flatMap((l) => wrapTextWithAnsi(l, width)));
+		};
+		const header = (i: number): string => {
+			const d = decision[i];
+			const mark =
+				d === true
+					? theme.fg("success", "✓ keep   ")
+					: d === false
+						? theme.fg("error", "✗ discard")
+						: theme.fg("warning", "? decide ");
+			const arrow = expanded[i] ? "▾" : "▸";
+			const name = i === cursor ? theme.bold(items[i]!.name) : items[i]!.name;
+			const line = `${i === cursor ? theme.fg("accent", "▶") : " "} ${mark} ${arrow} ${name} ${theme.fg("dim", `(${items[i]!.detail})`)}`;
+			return line;
+		};
+		const content = (width: number): string[] => {
+			const out: string[] = [];
+			headerAt = [];
+			items.forEach((_, i) => {
+				headerAt.push(out.length);
+				out.push(truncateToWidth(header(i), width));
+				if (expanded[i]) for (const l of diffLines(i, Math.max(1, width - INDENT.length))) out.push(INDENT + l);
+			});
+			contentLength = out.length;
+			return out;
+		};
+		const clampTop = () => {
+			top = Math.min(Math.max(0, contentLength - viewHeight()), Math.max(0, top));
+		};
+		/** Scroll so the cursor's header line is on screen (needs headerAt from a render). */
+		let followCursor = false;
+		const scroll = (delta: number) => {
+			top += delta;
+			clampTop();
+			tui.requestRender();
+		};
+		const move = (delta: number) => {
+			cursor = Math.min(items.length - 1, Math.max(0, cursor + delta));
+			followCursor = true;
+			tui.requestRender();
+		};
+		const setAll = (keep: boolean) => {
+			decision.fill(keep);
+			tui.requestRender();
+		};
+
+		return {
+			capturesViewportInput: true,
+			handleMouse(event) {
+				if (event.type !== "wheel" || !event.wheelDelta) return undefined;
+				scroll(event.wheelDelta);
+				return { handled: true };
+			},
+			render(width: number): string[] {
+				const all = content(width);
+				const h = viewHeight();
+				if (followCursor) {
+					const at = headerAt[cursor]!;
+					if (at < top) top = at;
+					else if (at >= top + h) top = at - h + 1;
+					followCursor = false;
+				}
+				clampTop();
+				const shown = all.slice(top, top + h);
+				while (shown.length < h) shown.push("");
+				const kept = decision.filter((d) => d === true).length;
+				const discarded = decision.filter((d) => d === false).length;
+				const open = items.length - kept - discarded;
+				const counts =
+					`${theme.fg("success", `${kept} keep`)} · ${theme.fg("error", `${discarded} discard`)}` +
+					(open ? ` · ${theme.fg("warning", `${open} undecided`)}` : "");
+				const status = open
+					? theme.fg("warning", "decide every file, then press shift+enter")
+					: theme.fg("accent", theme.bold("press shift+enter to apply"));
+				const pos = all.length > h ? `[${top + 1}-${top + Math.min(h, all.length - top)}/${all.length}] ` : "";
+				const help =
+					`${pos}↑↓ move · enter keep/discard · tab diff · shift+v keep all · shift+x discard all · shift+enter apply · ` +
+					`pgup/pgdn/home/end/wheel scroll · c ${full ? "changes only" : "whole file"}`;
+				return [
+					truncateToWidth(theme.fg("warning", theme.bold(title)), width),
+					theme.fg("dim", "─".repeat(width)),
+					...shown,
+					theme.fg("dim", "─".repeat(width)),
+					truncateToWidth(`${counts}   ${status}`, width),
+					truncateToWidth(theme.fg("dim", help), width),
+				];
+			},
+			handleInput(data: string): void {
+				// Shift+V / Shift+X: plain "V"/"X" in legacy terminals, CSI-u with the Kitty protocol.
+				if (matchesKey(data, "shift+v")) return setAll(true);
+				if (matchesKey(data, "shift+x")) return setAll(false);
+				// Checked before Enter so a user keybinding that maps confirm to shift+enter cannot toggle.
+				// Needs a terminal that reports Shift+Enter (Kitty protocol, xterm modifyOtherKeys, tmux
+				// with extended-keys); otherwise it arrives as plain Enter.
+				if (matchesKey(data, "shift+enter")) {
+					if (decision.every((d) => d !== undefined)) done(decision as boolean[]);
+					return;
+				}
+				if (keybindings.matches(data, "tui.select.confirm")) {
+					decision[cursor] = decision[cursor] !== true;
+					return tui.requestRender();
+				}
+				if (matchesKey(data, "tab")) {
+					expanded[cursor] = !expanded[cursor];
+					followCursor = true;
+					return tui.requestRender();
+				}
+				if (data === "c" || data === "C") {
+					full = !full;
+					diffCache = [];
+					return tui.requestRender();
+				}
+				if (keybindings.matches(data, "tui.select.up") || data === "k") return move(-1);
+				if (keybindings.matches(data, "tui.select.down") || data === "j") return move(1);
+				if (keybindings.matches(data, "tui.select.pageUp")) return scroll(-viewHeight());
+				if (keybindings.matches(data, "tui.select.pageDown") || data === " ") return scroll(viewHeight());
+				if (matchesKey(data, "home") || data === "g") return scroll(-Infinity);
+				if (matchesKey(data, "end") || data === "G") return scroll(Infinity);
+			},
+			invalidate() {
+				diffCache = [];
+			},
+		};
+	}, { overlay: true, overlayOptions: { row: 0, col: 0, width: "100%", maxHeight: "100%", margin: 0 } });
+}
+
 // ---------------------------------------------------------------- extension
 
 export default function (pi: ExtensionAPI) {
@@ -343,7 +637,7 @@ export default function (pi: ExtensionAPI) {
 	 * Approved changes update the baseline. Each session gets a new extension instance and
 	 * session_start runs before anything else, so these are always set before they are used.
 	 */
-	let config: Config = { guarded: [...DEFAULT_GUARDED], errors: [] };
+	let config: Config = defaultConfig();
 	let baseline: Snapshot = new Map();
 	/** Re-read the config and take a new baseline. Await it: the agent must not run before the baseline is taken. */
 	const refreshState = async (ctx: ExtensionContext) => {
@@ -366,25 +660,44 @@ export default function (pi: ExtensionAPI) {
 	const tellUser = "Do not try to change it another way; tell the user what change you want and why.";
 
 	/**
-	 * Compare every guarded file with the baseline. The user approves or denies each change
-	 * (without a UI, every change is denied); denied changes are reverted.
+	 * Compare every guarded file with the baseline. All unapproved changes are shown in one dialog
+	 * where the user keeps or discards each file (without a UI, every change is reverted).
+	 * Discarded files are reverted to the baseline.
 	 */
 	const gate = async (ctx: ExtensionContext): Promise<{ reverted: string[]; failed: string[] }> => {
 		const current = await snapshot(ctx.cwd, config);
 		const reverted: string[] = [];
 		const failed: string[] = [];
+		const changes: { name: string; was: FileState | undefined; now: FileState | undefined }[] = [];
 		for (const name of [...new Set([...baseline.keys(), ...current.keys()])].sort()) {
 			const was = baseline.get(name);
 			const now = current.get(name);
-			if (sameState(was, now) || !needsApproval(name)) continue;
-			if (ctx.hasUI) {
-				const what = !now ? "deleted" : !was ? "created" : "changed";
-				const [before, after] = [text(was), text(now)];
-				const title = `${name} was ${what} without approval (${changeSummary(before, after)}). Keep?`;
-				if (await reviewChange(ctx, title, contentDiff(before, after))) {
-					setBaseline(name, now);
-					continue;
-				}
+			if (!sameState(was, now) && needsApproval(name)) changes.push({ name, was, now });
+		}
+		if (!changes.length) return { reverted, failed };
+
+		let keep: boolean[] = changes.map(() => false);
+		if (ctx.hasUI) {
+			const what = (c: (typeof changes)[number]) => (!c.now ? "deleted" : !c.was ? "created" : "changed");
+			const summary = (c: (typeof changes)[number]) => changeSummary(text(c.was), text(c.now));
+			if (changes.length === 1) {
+				const c = changes[0]!;
+				const title = `${c.name} was ${what(c)} without approval (${summary(c)}). Keep?`;
+				keep = [await reviewChange(ctx, title, contentDiff(text(c.was), text(c.now)))];
+			} else {
+				const title = `${changes.length} guarded files were changed without approval`;
+				const items = changes.map((c) => ({
+					name: c.name,
+					detail: `${what(c)}, ${summary(c)}`,
+					diff: contentDiff(text(c.was), text(c.now)),
+				}));
+				keep = await reviewBatch(ctx, title, items);
+			}
+		}
+		for (const [i, { name, was, now }] of changes.entries()) {
+			if (keep[i]) {
+				setBaseline(name, now);
+				continue;
 			}
 			try {
 				await restore(resolve(ctx.cwd, name), was);
@@ -488,14 +801,14 @@ export default function (pi: ExtensionAPI) {
 			const file = resolve(ctx.cwd, CHECK_FILE);
 			if (!(await readState(file))) return fail(`${CHECK_FILE} not found in ${ctx.cwd}.`, { exitCode: null });
 
-			const result = await pi.exec("bash", [file], { cwd: ctx.cwd, signal });
-			if (result.killed && signal?.aborted) return fail("Check cancelled.", { exitCode: result.code });
+			const timeout = config.checkTimeout;
+			const result = await runCheck(file, ctx.cwd, timeout, signal);
+			if (result.cancelled) return fail("Check cancelled.", { exitCode: result.code });
 
-			const output = [result.stdout, result.stderr].filter((s) => s.trim()).join("\n");
-			const t = truncateTail(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+			const t = truncateTail(result.output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
 			let out = t.truncated ? `[output truncated to the last ${t.outputLines} lines]\n${t.content}` : t.content;
 
-			if (result.code === 0) {
+			if (result.code === 0 && !result.timedOut) {
 				failures = 0;
 				return {
 					content: [{ type: "text", text: `${out}\n\nCheck passed (exit 0).` }],
@@ -505,13 +818,18 @@ export default function (pi: ExtensionAPI) {
 
 			failures++;
 			const limit = maxFailures();
-			out += `\n\nCheck failed (exit ${result.code}). Consecutive failures: ${failures}/${limit}.`;
+			const why = result.timedOut
+				? `timed out after ${timeout}s and was stopped; checkTimeoutSeconds in ${CONFIG_FILE} sets the limit`
+				: result.code === null
+					? `killed by ${result.exitSignal ?? "an error"}`
+					: `exit ${result.code}`;
+			out += `\n\nCheck failed (${why}). Consecutive failures: ${failures}/${limit}.`;
 			if (failures >= limit) {
 				stopped = true;
 				out += `\n\n${stopReason()}`;
 				if (ctx.hasUI) ctx.ui.notify(`check.sh failed ${failures} times in a row; agent stopped.`, "warning");
 			}
-			return { ...fail(out, { exitCode: result.code }), terminate: stopped };
+			return { ...fail(out, { exitCode: result.code, timedOut: result.timedOut }), terminate: stopped };
 		},
 	});
 

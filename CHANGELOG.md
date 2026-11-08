@@ -3,6 +3,27 @@
 Releases follow [semver](https://semver.org) (see Versioning in README.md). Tags `v1`...`v13`
 predate this file and count as `1.0.0`...`13.0.0`.
 
+## v14.1.0 (unreleased)
+
+### Added
+
+- check-guard: `checkTimeoutSeconds` in `.pi/check-guard.json` (default 600, 0 turns it off). A
+  `check` run that takes longer is stopped, along with every process `check.sh` started, and counts
+  as a failing check. Before, a hanging check ran forever.
+- `models.sh`: list or switch the models of `.pi/settings.json`, the prompts and the agents by role
+  (`strong`, `standard`, `fast`) instead of editing eight files.
+
+### Changed
+
+- check-guard: unapproved changes found at one time are shown in a single dialog instead of one
+  dialog per file. For several files it lists their paths: Enter toggles a file between keep and
+  discard, Tab shows or hides its diff, Shift+V keeps all, Shift+X discards all, Shift+Enter applies once
+  every file is decided.
+- `/solo` and `/advised` descriptions name model roles (strong, standard) instead of Opus and
+  Sonnet.
+- check-guard: unknown keys in `.pi/check-guard.json` show a warning instead of being silently
+  ignored. A config that is not a JSON object also warns.
+
 ## v14.0.0 (2026-11-08)
 
 ### Breaking

@@ -1,5 +1,5 @@
 ---
-description: Ticket on Opus alone
+description: Ticket on the strong model alone
 model: claude-code/claude-opus-5-5
 thinking: medium
 restore: false

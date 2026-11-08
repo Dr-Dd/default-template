@@ -1,5 +1,5 @@
 ---
-description: Ticket on Sonnet with an Opus advisor
+description: Ticket on the standard model with a strong-model advisor
 model: claude-code/claude-sonnet-5-5
 thinking: medium
 restore: false
