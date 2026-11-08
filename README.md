@@ -7,7 +7,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until you replace its placeholder steps with the project's commands
 - `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh`, stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; `/advised` assumes the default of 3; your next message resets the count), blocks bash commands that run `check.sh` (so the limit and the guard cannot be skipped), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected. Not overwritten by `copier update`
-- `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`) and subagent settings that `AGENTS.md` and the prompts rely on
+- `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses) and subagent settings that `AGENTS.md` and the prompts rely on
 - `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses, and the `oracle` advisor used by `/advised`
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
