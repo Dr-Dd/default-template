@@ -8,6 +8,8 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+## v0.16.0 (2026-11-08)
+
 ### Breaking
 
 - check-guard: the `subagent` tool is allowlisted instead of blocklisted. Only the actions
