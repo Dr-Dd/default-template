@@ -76,7 +76,7 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
   (`strong`, `standard`, `fast`) instead of editing eight files.
 - `/quick`: small changes on the standard model. It follows AGENTS.md but writes no `SPEC.md`
   and does not stop for approval (it states a short plan instead); the review runs only if you ask
-  for one, with the plan in `.review/spec.md` as the spec.
+  for one, with the plan inline.
 
 ### Changed
 
