@@ -2,6 +2,7 @@ _exclude:
   - copier.yml
   - README.md
   - CHANGELOG.md
+  - TODO.md
   - LICENSE
   - .git
   - .review/

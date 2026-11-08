@@ -137,10 +137,6 @@ Releases are git tags `vMAJOR.MINOR.PATCH` (semver), listed in [CHANGELOG.md](CH
 - minor: a new feature that keeps working setups working, e.g. a new prompt or `tickets.sh` option.
 - patch: fixes and documentation.
 
-## TODO
-
-- **Run ticket sessions in an isolated environment.** Ticket sessions run `pi --approve` with arbitrary bash and can currently reach the whole home directory (ssh keys, credentials, browser profiles). Plan: a rootless podman container with only the worktree mounted (not distrobox, which shares `$HOME`), tmux inside it, and a `tickets.sh` launcher for it. To solve first: logins inside the container (the Claude CLI used by `pi-claude-code`; narrow git credentials, no personal ssh keys), getting branches out (push from the container or share the git directory), and each project's `check.sh` toolchain in the image. Later, the same setup could move to a VM or remote box.
-
 ## License
 
 [WTFPL](LICENSE). The license covers this template repository only; `copier copy` does not add it to your project.
