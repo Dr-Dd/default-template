@@ -5,7 +5,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `AGENTS.md`: agent instructions. If you also keep a global `~/.pi/agent/AGENTS.md`, pi loads it next to this one
 - `.gitignore`: common ignore rules
 - `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until you replace its placeholder steps with the project's commands
-- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (so the limit and the guard cannot be skipped), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
+- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses) and subagent settings that `AGENTS.md` and the prompts rely on
@@ -51,6 +51,15 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 - The config is read at session start and on each of your messages. If it is unreadable or invalid, the default list stays guarded and pi shows a warning. Unknown keys (e.g. a misspelled `guardedFiles`) are ignored with a warning.
 
 Limits: the guard protects the text of existing files, not their behaviour. New files can still change how existing tests run, e.g. a new `conftest.py` that overrides a fixture, a monkeypatch in a new test file, or a special case in the code under test. A change made through bash is caught at the next check or at the end of the run, not right away. Review those.
+
+## Running check.sh
+
+The agent runs the check with the `check` tool, which counts failures and checks guarded files first. Running `check.sh` through bash would skip both, so check-guard blocks it in two layers:
+
+- Before a bash command runs, a pattern match blocks the common forms (`./check.sh`, `bash check.sh`, `nice ./check.sh`, `eval ./check.sh`, `/usr/bin/env bash check.sh`, ...) with a clear message.
+- Every bash command also runs with `BASH_ENV` pointing at `.pi/extensions/check-guard/bash-env.sh`. Bash reads that file before running any script, so a bash that would run `check.sh` (or a byte-identical copy of it) exits with status 1, however it was started: `make check`, `xargs`, `find -exec`, a symlink, a subprocess from Python. A `BASH_ENV` you started pi with still runs, after the check.
+
+This is a tripwire, not a sandbox. Deliberate dodges still work: clearing `BASH_ENV` (`env -i`, `env -u BASH_ENV`, `unset`), feeding the script to bash on stdin or with `-c` (`cat check.sh | bash`), running it with `sh` or `bash --posix`/`-p` hidden from the pattern match (e.g. inside `make`), or running an edited copy. Running the project's own steps (`npm test`, ...) is allowed and normal while debugging. Either way the guarded-file check still runs when the agent stops.
 
 ## Models
 

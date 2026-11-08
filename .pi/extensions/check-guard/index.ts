@@ -4,7 +4,11 @@
  *
  * - `check` tool: runs ./check.sh and reports its exit code to pi. After PI_CHECK_MAX_FAILURES
  *   (default 3) failing runs in a row, the agent is stopped until the user sends a new message.
- *   bash calls that run check.sh are blocked, so the failure limit and the gate cannot be skipped.
+ *   Running check.sh through bash is blocked, so failing runs cannot dodge the count: a regex blocks
+ *   the common forms up front, and every bash command gets BASH_ENV pointing at bash-env.sh, which
+ *   stops any bash that would run check.sh (or a copy of it), however it was started (nice, eval,
+ *   env, make, xargs, a subprocess...). A tripwire, not a sandbox: clearing BASH_ENV or piping
+ *   the script into bash still gets through.
  * - Guarded files (globs in .pi/check-guard.json `guardedFiles`, plus the config and this
  *   extension) are compared with a baseline: their content when the session started or when the
  *   user last sent a message while the agent was idle. Only files committed in HEAD at that point
@@ -32,6 +36,7 @@ import { execFile, spawn } from "node:child_process";
 import { chmod, glob, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -65,11 +70,21 @@ const DEFAULT_GUARDED: readonly string[] = ["check.sh", "AGENTS.md", ".pi/agents
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
 /**
  * A bash command that runs check.sh: the script in command position (after the start or a
- * separator, env assignments and wrappers like bash/sh/exec/env/time/timeout). Mentions such as
- * `cat check.sh` or `git diff check.sh` do not match. A heuristic, not a sandbox.
+ * separator, env assignments and wrappers like bash/sh/exec/env/nice/eval/timeout, also by path,
+ * e.g. /usr/bin/env). Mentions such as `cat check.sh` or `git diff check.sh` do not match. A first
+ * layer with a clear message; bash-env.sh catches what it misses, except shells that skip BASH_ENV
+ * (sh, bash --posix/-p), which this regex is the only check for.
  */
 const RUNS_CHECK =
-	/(?:^|[;&|(`\n]|\$\()\s*(?:(?:[A-Za-z_]\w*=\S*|env|exec|time|nohup|command|sudo|source|\.|timeout\s+\S+|(?:ba|z|da)?sh)\s+(?:-\S+\s+)*)*['"]?(?:\S*\/)?check\.sh(?=$|[\s;&|)`'"])/;
+	/(?:^|[;&|(`\n]|\$\()\s*(?:(?:[A-Za-z_]\w*=\S*|(?:\S*\/)?(?:env|exec|eval|time|nice|nohup|setsid|stdbuf|ionice|xargs|command|sudo|source|timeout\s+\S+|(?:ba|z|da|k)?sh)|\.)\s+(?:-\S+\s+)*)*['"]?(?:\S*\/)?check\.sh(?=$|[\s;&|)`'"])/;
+/** Read by every non-interactive bash the agent's commands start (BASH_ENV); stops bash running check.sh. */
+const BASH_ENV_HOOK = fileURLToPath(new URL("./bash-env.sh", import.meta.url));
+/** BASH_ENV pi was started with: the hook sources it, so the user's own BASH_ENV keeps working. */
+const ORIGINAL_BASH_ENV = process.env.BASH_ENV ?? "";
+const shQuote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+/** Prepended to each bash tool command. POSIX syntax, so it works with any shell pi uses. */
+const bashPrefix = (cwd: string) =>
+	`export BASH_ENV=${shQuote(BASH_ENV_HOOK)} PI_CHECK_GUARD_ROOT=${shQuote(cwd)} PI_CHECK_GUARD_BASH_ENV=${shQuote(ORIGINAL_BASH_ENV)}\n`;
 /** customType of the message that tells the model about changes reverted at the end of a run. */
 const REVERT_MESSAGE = "check-guard-reverted";
 /** Directories never searched for guarded files. */
@@ -255,7 +270,10 @@ type CheckResult = {
 function runCheck(file: string, cwd: string, timeoutSeconds: number, signal?: AbortSignal): Promise<CheckResult> {
 	return new Promise((done) => {
 		const detached = process.platform !== "win32";
-		const proc = spawn("bash", [file], { cwd, detached, stdio: ["ignore", "pipe", "pipe"] });
+		// Without PI_CHECK_GUARD_ROOT the BASH_ENV hook does nothing (relevant when pi itself runs under it).
+		const env = { ...process.env };
+		delete env.PI_CHECK_GUARD_ROOT;
+		const proc = spawn("bash", [file], { cwd, env, detached, stdio: ["ignore", "pipe", "pipe"] });
 		// Keep only the tail: the result is truncated to its last lines anyway.
 		const chunks: Buffer[] = [];
 		let bytes = 0;
@@ -835,13 +853,19 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event, ctx) => {
 		if (stopped) return { block: true, reason: stopReason(), terminate: true };
-		if (isToolCallEventType("bash", event) && RUNS_CHECK.test(event.input.command)) {
-			return {
-				block: true,
-				reason:
-					`Do not run ${CHECK_FILE} through bash: use the check tool. ` +
-					"Bash runs skip its failure limit and guarded-file check.",
-			};
+		if (isToolCallEventType("bash", event)) {
+			if (RUNS_CHECK.test(event.input.command)) {
+				return {
+					block: true,
+					reason:
+						`Do not run ${CHECK_FILE} through bash: use the check tool. ` +
+						"Bash runs skip its failure limit and guarded-file check.",
+				};
+			}
+			// Catches the forms the regex misses, when check.sh starts. Only the executed copy of the
+			// arguments changes; the transcript keeps the model's command.
+			event.input.command = bashPrefix(ctx.cwd) + event.input.command;
+			return undefined;
 		}
 		if (!isToolCallEventType("write", event) && !isToolCallEventType("edit", event)) return undefined;
 

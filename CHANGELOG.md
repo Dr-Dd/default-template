@@ -24,6 +24,16 @@ predate this file and count as `1.0.0`...`13.0.0`.
 - check-guard: unknown keys in `.pi/check-guard.json` show a warning instead of being silently
   ignored. A config that is not a JSON object also warns.
 
+### Fixed
+
+- check-guard: running `check.sh` through bash is now also stopped when `check.sh` starts, not only
+  when the command text matches. Every bash command runs with `BASH_ENV` set to the new
+  `.pi/extensions/check-guard/bash-env.sh`, which exits bash if the script is `check.sh` or a copy
+  of it. This catches `make check`, `xargs`, `find -exec`, symlinks and subprocesses. The pattern
+  also matches `nice`, `eval`, `xargs`, `setsid` and wrappers given by path (`/usr/bin/env`).
+  Deliberate dodges (clearing `BASH_ENV`, `cat check.sh | bash`) still work; see "Running
+  check.sh" in README.md.
+
 ## v14.0.0 (2026-11-08)
 
 ### Breaking
