@@ -11,11 +11,13 @@
  *   the script into bash still gets through.
  * - Guarded files (globs in .pi/check-guard.json `guardedFiles`, plus the config and this
  *   extension) are compared with a baseline: their content when the session started or when the
- *   user last sent a message while the agent was idle. Only files committed in HEAD at that point
- *   are in the baseline ("frozen"), so new files, e.g. a ticket's new tests, stay editable until
- *   the user commits them. Without a commit (or outside git) every existing guarded file is frozen.
- *   Changing or deleting a frozen file needs the user's approval; creating a new one is allowed
- *   (except the config and the extension: they are always frozen and creating them needs approval).
+ *   user last sent a message while the agent was idle. Files matched by a wildcard glob are in the
+ *   baseline ("frozen") only once committed in HEAD, so new files, e.g. a ticket's new tests, stay
+ *   editable until the user commits them. Without a commit (or outside git) every existing guarded
+ *   file is frozen. Changing or deleting a frozen file needs the user's approval; creating a new
+ *   one is allowed, except for files that are always frozen and need approval even to be created:
+ *   the config, this extension, and files named explicitly in guardedFiles (no glob syntax, e.g.
+ *   `check.sh`).
  *   - write/edit on a guarded file ask first, with the full diff.
  *   - Every other way of changing files (bash, background processes, symlinks, test runs that
  *     rewrite fixtures) is caught by a gate that compares all guarded files with the baseline
@@ -142,7 +144,8 @@ async function loadConfig(cwd: string): Promise<Config> {
 	}
 	if (obj.guardedFiles !== undefined) {
 		const g = globs(obj.guardedFiles);
-		if (g) cfg.guarded = g;
+		// matchesGlob does not match a leading "./" against relative paths, so drop it.
+		if (g) cfg.guarded = g.map((s) => s.replace(/^(\.\/)+/, ""));
 		else cfg.errors.push(`${CONFIG_FILE}: guardedFiles must be a list of globs`);
 	}
 	if (obj.checkTimeoutSeconds !== undefined) {
@@ -159,8 +162,16 @@ async function loadConfig(cwd: string): Promise<Config> {
 
 const allGlobs = (cfg: Config) => [...ALWAYS_GUARDED, ...cfg.guarded];
 const isGuarded = (cfg: Config, rel: string) => allGlobs(cfg).some((g) => matchesGlob(rel, g));
-/** Guarded files that need approval even to be created. */
-const isAlwaysGuarded = (rel: string) => ALWAYS_GUARDED.some((g) => matchesGlob(rel, g));
+/** A guardedFiles entry without glob syntax names one file explicitly, e.g. `check.sh`. */
+const isLiteral = (g: string) => !/[*?[\]{}()!]/.test(g);
+/**
+ * Guarded files that are frozen even when new, so creating them needs approval too: the config,
+ * the extension, and every file named explicitly in guardedFiles. Files matched only by a wildcard
+ * (`tests/**`) are frozen once committed, so a ticket can add new ones freely.
+ */
+const isAlwaysGuarded = (cfg: Config, rel: string) =>
+	ALWAYS_GUARDED.some((g) => matchesGlob(rel, g)) ||
+	cfg.guarded.some((g) => isLiteral(g) && g === rel);
 
 // ---------------------------------------------------------------- files
 
@@ -209,7 +220,8 @@ function committedFiles(cwd: string): Promise<Set<string> | undefined> {
 /**
  * Guarded files that exist now. With `sticky`, only frozen ones (the baseline): committed in HEAD
  * (all of them if there is no commit), in `sticky` (frozen before: untracking a file must not
- * unfreeze it), or always guarded. Directories are skipped: use `dir/**` to guard their contents.
+ * unfreeze it), or always guarded (including files named explicitly in guardedFiles).
+ * Directories are skipped: use `dir/**` to guard their contents.
  */
 async function snapshot(cwd: string, cfg: Config, sticky?: ReadonlySet<string>): Promise<Snapshot> {
 	const snap: Snapshot = new Map();
@@ -217,7 +229,7 @@ async function snapshot(cwd: string, cfg: Config, sticky?: ReadonlySet<string>):
 	const exclude = (p: string) => p.split(/[\\/]/).some((part) => GLOB_SKIP_DIRS.has(part));
 	for await (const rel of glob(allGlobs(cfg), { cwd, exclude })) {
 		const name = rel.split(sep).join("/");
-		if (committed && !committed.has(name) && !sticky!.has(name) && !isAlwaysGuarded(name)) continue;
+		if (committed && !committed.has(name) && !sticky!.has(name) && !isAlwaysGuarded(cfg, name)) continue;
 		const st = await readState(resolve(cwd, name));
 		if (st) snap.set(name, st);
 	}
@@ -664,7 +676,7 @@ export default function (pi: ExtensionAPI) {
 		baseline = await snapshot(ctx.cwd, config, new Set(baseline.keys()));
 	};
 	/** Frozen guarded files: changing, deleting or creating them needs the user's approval. */
-	const needsApproval = (name: string) => baseline.has(name) || isAlwaysGuarded(name);
+	const needsApproval = (name: string) => baseline.has(name) || isAlwaysGuarded(config, name);
 	const setBaseline = (name: string, st: FileState | undefined) => {
 		if (st) baseline.set(name, st);
 		else baseline.delete(name);

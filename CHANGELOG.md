@@ -3,7 +3,13 @@
 Releases follow [semver](https://semver.org) (see Versioning in README.md). Tags `v1`...`v13`
 predate this file and count as `1.0.0`...`13.0.0`.
 
-## v14.1.0 (unreleased)
+## v15.0.0 (unreleased)
+
+### Breaking
+
+- check-guard: a file named explicitly in `guardedFiles` (no glob syntax, e.g. `check.sh`) now
+  needs approval even to be created, like the config. Files matched only by a wildcard
+  (`tests/**`) stay free to create until committed, as before.
 
 ### Added
 
@@ -36,6 +42,8 @@ predate this file and count as `1.0.0`...`13.0.0`.
   also matches `nice`, `eval`, `xargs`, `setsid` and wrappers given by path (`/usr/bin/env`).
   Deliberate dodges (clearing `BASH_ENV`, `cat check.sh | bash`) still work; see "Running
   check.sh" in README.md.
+- check-guard: `guardedFiles` entries starting with `./` (e.g. `./check.sh`) matched nothing, so
+  the file was not guarded. The prefix is now ignored.
 
 ## v14.0.0 (2026-11-08)
 
