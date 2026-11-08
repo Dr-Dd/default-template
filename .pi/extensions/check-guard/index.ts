@@ -9,15 +9,14 @@
  *   stops any bash that would run check.sh (or a copy of it), however it was started (nice, eval,
  *   env, make, xargs, a subprocess...). A tripwire, not a sandbox: clearing BASH_ENV or piping
  *   the script into bash still gets through.
- * - Guarded files (globs in .pi/check-guard.json `guardedFiles`, plus the config and this
- *   extension) are compared with a baseline: their content when the session started or when the
- *   user last sent a message while the agent was idle. Files matched by a wildcard glob are in the
- *   baseline ("frozen") only once committed in HEAD, so new files, e.g. a ticket's new tests, stay
- *   editable until the user commits them. Without a commit (or outside git) every existing guarded
- *   file is frozen. Changing or deleting a frozen file needs the user's approval; creating a new
- *   one is allowed, except for files that are always frozen and need approval even to be created:
- *   the config, this extension, and files named explicitly in guardedFiles (no glob syntax, e.g.
- *   `check.sh`).
+ * - Guarded files (globs in .pi/check-guard.json `strictFiles` and `guardedFiles`, plus the config
+ *   and this extension) are compared with a baseline: their content when the session started or
+ *   when the user last sent a message while the agent was idle. Files matched by guardedFiles are
+ *   in the baseline ("frozen") only once committed in HEAD, so new files, e.g. a ticket's new
+ *   tests, stay editable until the user commits them. Without a commit (or outside git) every
+ *   existing guarded file is frozen. Changing or deleting a frozen file needs the user's approval;
+ *   creating a new one is allowed, except for files that are always frozen and need approval even
+ *   to be created: the config, this extension, and files matched by strictFiles.
  *   - write/edit on a guarded file ask first, with the full diff.
  *   - Every other way of changing files (bash, background processes, symlinks, test runs that
  *     rewrite fixtures) is caught by a gate that compares all guarded files with the baseline
@@ -59,17 +58,27 @@ const CONFIG_FILE = ".pi/check-guard.json";
 /** checkTimeoutSeconds when the config does not set it. */
 const DEFAULT_CHECK_TIMEOUT = 600;
 /** Keys .pi/check-guard.json may contain; others are reported. */
-const CONFIG_KEYS: readonly string[] = ["guardedFiles", "checkTimeoutSeconds"];
+const CONFIG_KEYS: readonly string[] = ["guardedFiles", "strictFiles", "checkTimeoutSeconds"];
 /** Grace period between SIGTERM and SIGKILL when the check is stopped. */
 const KILL_GRACE_MS = 5000;
 /** How long to keep reading output after check.sh exits. */
 const PIPE_GRACE_MS = 1000;
 /** Output kept from a check run (the tail). */
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-/** guardedFiles when there is no config file. */
-const DEFAULT_GUARDED: readonly string[] = ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"];
+/** strictFiles when the config does not set them: the check, the worktree setup and the agent's own instructions. */
+const DEFAULT_STRICT: readonly string[] = ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
+// subagent actions that create, change or remove agent definitions or their settings. They write
+// agent files from inside the subagent tool, so the write/edit approval never sees them.
+const AGENT_MANAGEMENT = new Set([
+	"create", "update", "delete", "eject", "disable", "enable", "reset", "refine", "refine.rollback",
+]);
+
+// subagent actions known to start no child run. Any other call (no action, resume, schedule.create,
+// an action added by a later pi-subagents) may start children that read the guarded agent files.
+const NO_LAUNCH = new Set(["status", "list", "guide", "children.list", "models", "doctor", "validate", "refine.show"]);
+
 /**
  * A bash command that runs check.sh: the script in command position (after the start or a
  * separator, env assignments and wrappers like bash/sh/exec/env/nice/eval/timeout, also by path,
@@ -104,14 +113,17 @@ const diffContext = () => envInt("PI_CHECK_DIFF_CONTEXT", 0, 4);
 // ---------------------------------------------------------------- configuration
 
 type Config = {
+	/** Soft: frozen only once committed in HEAD, so new files stay free. */
 	guarded: string[];
+	/** Strict: always frozen, and creating a file needs approval too. */
+	strict: string[];
 	/** Seconds before a check run is stopped; 0 means no timeout. */
 	checkTimeout: number;
 	/** Problems found while reading the config (shown to the user). */
 	errors: string[];
 };
 
-const defaultConfig = (): Config => ({ guarded: [...DEFAULT_GUARDED], checkTimeout: DEFAULT_CHECK_TIMEOUT, errors: [] });
+const defaultConfig = (): Config => ({ guarded: [], strict: [...DEFAULT_STRICT], checkTimeout: DEFAULT_CHECK_TIMEOUT, errors: [] });
 
 /** Read CONFIG_FILE. Problems never weaken protection: an unreadable config keeps the defaults. */
 async function loadConfig(cwd: string): Promise<Config> {
@@ -142,11 +154,12 @@ async function loadConfig(cwd: string): Promise<Config> {
 			cfg.errors.push(`${CONFIG_FILE}: unknown key "${key}" is ignored (known keys: ${CONFIG_KEYS.join(", ")})`);
 		}
 	}
-	if (obj.guardedFiles !== undefined) {
-		const g = globs(obj.guardedFiles);
+	for (const [key, field] of [["guardedFiles", "guarded"], ["strictFiles", "strict"]] as const) {
+		if (obj[key] === undefined) continue;
+		const g = globs(obj[key]);
 		// matchesGlob does not match a leading "./" against relative paths, so drop it.
-		if (g) cfg.guarded = g.map((s) => s.replace(/^(\.\/)+/, ""));
-		else cfg.errors.push(`${CONFIG_FILE}: guardedFiles must be a list of globs`);
+		if (g) cfg[field] = g.map((s) => s.replace(/^(\.\/)+/, ""));
+		else cfg.errors.push(`${CONFIG_FILE}: ${key} must be a list of globs`);
 	}
 	if (obj.checkTimeoutSeconds !== undefined) {
 		const t = obj.checkTimeoutSeconds;
@@ -160,18 +173,15 @@ async function loadConfig(cwd: string): Promise<Config> {
 	return cfg;
 }
 
-const allGlobs = (cfg: Config) => [...ALWAYS_GUARDED, ...cfg.guarded];
+const allGlobs = (cfg: Config) => [...ALWAYS_GUARDED, ...cfg.strict, ...cfg.guarded];
 const isGuarded = (cfg: Config, rel: string) => allGlobs(cfg).some((g) => matchesGlob(rel, g));
-/** A guardedFiles entry without glob syntax names one file explicitly, e.g. `check.sh`. */
-const isLiteral = (g: string) => !/[*?[\]{}()!]/.test(g);
 /**
  * Guarded files that are frozen even when new, so creating them needs approval too: the config,
- * the extension, and every file named explicitly in guardedFiles. Files matched only by a wildcard
+ * the extension, and every file matched by strictFiles. Files matched only by guardedFiles
  * (`tests/**`) are frozen once committed, so a ticket can add new ones freely.
  */
 const isAlwaysGuarded = (cfg: Config, rel: string) =>
-	ALWAYS_GUARDED.some((g) => matchesGlob(rel, g)) ||
-	cfg.guarded.some((g) => isLiteral(g) && g === rel);
+	[...ALWAYS_GUARDED, ...cfg.strict].some((g) => matchesGlob(rel, g));
 
 // ---------------------------------------------------------------- files
 
@@ -220,7 +230,7 @@ function committedFiles(cwd: string): Promise<Set<string> | undefined> {
 /**
  * Guarded files that exist now. With `sticky`, only frozen ones (the baseline): committed in HEAD
  * (all of them if there is no commit), in `sticky` (frozen before: untracking a file must not
- * unfreeze it), or always guarded (including files named explicitly in guardedFiles).
+ * unfreeze it), or always guarded (strictFiles).
  * Directories are skipped: use `dir/**` to guard their contents.
  */
 async function snapshot(cwd: string, cfg: Config, sticky?: ReadonlySet<string>): Promise<Snapshot> {
@@ -863,8 +873,52 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	/** Names of the other tool calls in the assistant message that made `toolCallId`. */
+	const siblingCalls = (ctx: ExtensionContext, toolCallId: string): string[] => {
+		const branch = ctx.sessionManager.getBranch();
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i] as { type?: string; message?: { role?: string; content?: unknown } };
+			if (entry.type !== "message" || entry.message?.role !== "assistant" || !Array.isArray(entry.message.content)) continue;
+			const calls = entry.message.content.filter((c: { type?: string }) => c.type === "toolCall") as { id: string; name: string }[];
+			if (!calls.some((c) => c.id === toolCallId)) continue;
+			return calls.filter((c) => c.id !== toolCallId).map((c) => c.name);
+		}
+		return [];
+	};
+
 	pi.on("tool_call", async (event, ctx) => {
 		if (stopped) return { block: true, reason: stopReason(), terminate: true };
+		if (event.toolName === "subagent") {
+			const action = (event.input as { action?: unknown }).action;
+			if (typeof action === "string" && AGENT_MANAGEMENT.has(action.trim().toLowerCase())) {
+				return {
+					block: true,
+					reason: `Agent management (subagent action "${action}") is not allowed: agent definitions are guarded. ${tellUser}`,
+				};
+			}
+			if (typeof action === "string" && NO_LAUNCH.has(action.trim().toLowerCase())) return undefined;
+			// The tool is not ours, so we cannot make it sequential. Tool calls of one message are
+			// preflighted in order but run together afterwards: a bash edit in the same message would
+			// land after this gate, while the child starts. A launch must be alone in its message.
+			const siblings = siblingCalls(ctx, event.toolCallId);
+			if (siblings.length) {
+				return {
+					block: true,
+					reason: `A subagent launch must be the only tool call in its message (also called: ${siblings.join(", ")}). Call it again alone.`,
+				};
+			}
+			// Agent files changed since the baseline (e.g. through bash) would be read by the child.
+			const { reverted, failed } = await gate(ctx);
+			if (reverted.length || failed.length) {
+				const notes: string[] = [];
+				if (reverted.length) {
+					notes.push(`Guarded files were changed without the user's approval and have been reverted: ${reverted.join(", ")}.`);
+				}
+				if (failed.length) notes.push(`Guarded files were changed and could not be restored: ${failed.join("; ")}.`);
+				return { block: true, reason: `${notes.join(" ")} The subagent was not launched. ${tellUser}` };
+			}
+			return undefined;
+		}
 		if (isToolCallEventType("bash", event)) {
 			if (RUNS_CHECK.test(event.input.command)) {
 				return {

@@ -3,6 +3,28 @@
 Releases follow [semver](https://semver.org) (see Versioning in README.md). Tags `v1`...`v13`
 predate this file and count as `1.0.0`...`13.0.0`.
 
+## Unreleased
+
+### Breaking
+
+- check-guard: new `strictFiles` list in `.pi/check-guard.json`. Strict files are always protected
+  and need approval even to be created. `guardedFiles` now means only the soft level: protected
+  once committed, new files free, whatever the pattern (a literal name like `check.sh` no longer
+  makes it strict). `strictFiles` defaults to `check.sh`, `worktree-setup.sh`, `AGENTS.md`,
+  `.pi/settings.json`, `.pi/agents/**` and `.pi/prompts/**`; `guardedFiles` defaults to empty.
+  A new file under `.pi/agents/**` or `.pi/prompts/**` now needs approval. Move those entries
+  from your `guardedFiles` to `strictFiles` yourself (`copier update` keeps your config).
+
+### Changed
+
+- check-guard: blocks the `subagent` tool's agent-management actions (`create`, `update`, `delete`,
+  `eject`, `disable`, `enable`, `reset`, `refine`, `refine.rollback`). They wrote agent files
+  without the approval dialog.
+- check-guard: a `subagent` call that may start children (anything but status, list, guide and
+  similar) first checks the guarded files against the baseline, like the `check` tool, and is
+  refused if changes were reverted. It must also be the only tool call of its message, so a
+  `bash` edit cannot land after the check, while the child starts.
+
 ## v15.0.0 (2026-11-08)
 
 ### Breaking
