@@ -134,11 +134,12 @@ Notes:
 
 ## Versioning
 
-Releases are git tags `vMAJOR.MINOR.PATCH` (semver), listed in [CHANGELOG.md](CHANGELOG.md). The old tags `v1`...`v13` count as `1.0.0`...`13.0.0`, so numbering continues at `v14.0.0`.
+Releases are git tags `v0.MINOR.PATCH` (semver), listed in [CHANGELOG.md](CHANGELOG.md). The project is pre-1.0 and not stable: anything may change in any release. Earlier tags (`v1`...`v15.0.0`) were deleted and numbering restarted at `v0.15.0`.
 
-- major: a change that breaks an existing project or workflow, e.g. a new ticket file format, more files guarded by default, a removed prompt or agent.
-- minor: a new feature that keeps working setups working, e.g. a new prompt or `tickets.sh` option.
+- minor: a change that breaks an existing project or workflow, e.g. a new ticket file format, more files guarded by default, a removed prompt or agent. Also new features.
 - patch: fixes and documentation.
+
+`1.0.0` comes once the template is stable.
 
 ## License
 

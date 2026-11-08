@@ -1,9 +1,12 @@
 # Changelog
 
-Releases follow [semver](https://semver.org) (see Versioning in README.md). Tags `v1`...`v13`
-predate this file and count as `1.0.0`...`13.0.0`.
+Releases follow [semver](https://semver.org) (see Versioning in README.md). The project is
+pre-1.0: anything may change in any release, and breaking changes bump the minor version.
 
-## Unreleased
+The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The entries below
+`v0.15.0` keep the old numbering of the deleted tags and are history only.
+
+## v0.15.0 (2026-11-08)
 
 ### Breaking
 
@@ -25,7 +28,7 @@ predate this file and count as `1.0.0`...`13.0.0`.
   refused if changes were reverted. It must also be the only tool call of its message, so a
   `bash` edit cannot land after the check, while the child starts.
 
-## v15.0.0 (2026-11-08)
+## Old v15.0.0 (2026-11-08)
 
 ### Breaking
 
@@ -108,7 +111,7 @@ predate this file and count as `1.0.0`...`13.0.0`.
 - `tickets.sh`: the unused `PI_TICKET` variable (its reader, `ticket-status.ts`, was removed
   earlier).
 
-## v14.0.0 (2026-11-08)
+## Old v14.0.0 (2026-11-08)
 
 ### Breaking
 
