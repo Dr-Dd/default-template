@@ -19,6 +19,9 @@ predate this file and count as `1.0.0`...`13.0.0`.
 
 ### Added
 
+- `tickets.sh merge <slug>`: merges a ticket with `--no-ff` into the main checkout's current
+  branch, runs `check.sh` on the result and removes the ticket if it passes. Aborts on conflicts;
+  keeps the merge (undo: `git reset --hard ORIG_HEAD`) if the check fails. Refuses under pi.
 - check-guard: `checkTimeoutSeconds` in `.pi/check-guard.json` (default 600, 0 turns it off). A
   `check` run that takes longer is stopped, along with every process `check.sh` started, and counts
   as a failing check. Before, a hanging check ran forever.

@@ -3,6 +3,7 @@
 #
 #   ./tickets.sh start [--prompt solo|advised] [--base REF] [--dry-run] FILE|-
 #   ./tickets.sh list             (status, open tmux session, commits since the ticket started)
+#   ./tickets.sh merge SLUG       (merge --no-ff into the current branch, run check.sh, then remove)
 #   ./tickets.sh remove SLUG      (after you merged it: removes worktree and branch; refuses
 #                                  while SPEC.md or .review/ exists or a tmux pane is open there)
 #
@@ -37,8 +38,8 @@
 # --dry-run runs every check and prints what would start, without creating anything.
 # The /fanout prompt uses it to validate a ticket list before you confirm.
 #
-# Merging is up to you, e.g. from the main checkout:
-#   git merge --no-ff ticket/<slug> && ./tickets.sh remove <slug>
+# Merging is up to you: `./tickets.sh merge <slug>` from your own shell, or by hand from the
+# main checkout: git merge --no-ff ticket/<slug> && ./check.sh && ./tickets.sh remove <slug>
 
 set -euo pipefail
 
@@ -48,7 +49,7 @@ die() {
 }
 
 usage() {
-	sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,8p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	exit "${1:-1}"
 }
 
@@ -458,7 +459,7 @@ check_no_pane() {
 	fi
 }
 
-# The slug argument of remove: valid, with an existing ticket branch.
+# The slug argument of merge/remove: valid, with an existing ticket branch.
 check_slug_arg() {
 	local slug=$1
 	[[ -n $slug ]] || usage
@@ -484,6 +485,43 @@ check_ticket_done() {
 		die "worktree $dir has uncommitted changes; commit or discard them first"
 }
 
+# Merge a finished ticket into the main checkout's current branch, run check.sh on the result
+# and, if it passes, remove the ticket. Each ticket passed the check on its own base; this checks
+# the combination with everything merged before it.
+cmd_merge() {
+	local slug=${1:-}
+	check_slug_arg "$slug"
+	# Agents never merge (AGENTS.md). Under check-guard, check.sh would also be stopped by its
+	# BASH_ENV tripwire and look like a failing check, so say why instead.
+	[[ -z ${PI_CHECK_GUARD_ROOT-} ]] ||
+		die "merge runs check.sh outside the check tool, and agents do not merge (AGENTS.md); run it from your own shell"
+	local target
+	target=$(git -C "$main_root" branch --show-current)
+	[[ -n $target ]] || die "the main checkout is not on a branch; check out the branch to merge into"
+	# A clean tree keeps the undo (git reset --hard ORIG_HEAD) from destroying your own changes.
+	[[ -z $(git -C "$main_root" status --porcelain --untracked-files=no) ]] ||
+		die "the main checkout has uncommitted changes; commit or stash them first"
+	[[ -x $main_root/check.sh ]] || die "no executable check.sh in $main_root"
+	! git -C "$main_root" merge-base --is-ancestor "ticket/$slug" HEAD ||
+		die "ticket/$slug has nothing to merge into $target (no commits of its own); use: ./tickets.sh remove $slug"
+	check_ticket_done "$wt_root/$slug"
+
+	# --no-ff: always record a merge commit, so the ticket stays one unit in the history
+	# (git revert -m 1 <merge> undoes it), even when a fast-forward would be possible.
+	if ! git -C "$main_root" merge --no-ff --no-edit "ticket/$slug"; then
+		if git -C "$main_root" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+			git -C "$main_root" merge --abort
+			die "ticket/$slug conflicts with $target; the merge was aborted and $target is unchanged. Merge it by hand: git merge --no-ff ticket/$slug"
+		fi
+		die "git merge failed; $target is unchanged"
+	fi
+	echo "merged ticket/$slug into $target; running check.sh on the result"
+	if ! (cd "$main_root" && ./check.sh); then
+		die "check.sh fails after merging $slug. The merge is kept and the ticket is not removed. Fix it on $target, or undo the merge with: git reset --hard ORIG_HEAD"
+	fi
+	cmd_remove "$slug"
+}
+
 cmd_remove() {
 	local slug=${1:-}
 	check_slug_arg "$slug"
@@ -506,6 +544,7 @@ cmd_remove() {
 case ${1:-} in
 start) shift; cmd_start "$@" ;;
 list) shift; cmd_list ;;
+merge) shift; cmd_merge "$@" ;;
 remove) shift; cmd_remove "$@" ;;
 -h | --help) usage 0 ;;
 *) usage ;;

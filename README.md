@@ -98,6 +98,7 @@ Add CSV export to the reports page.
 ./tickets.sh start tickets.md     # --prompt advised, --base <ref> to change defaults
 ./tickets.sh start --dry-run - < tickets.md   # read stdin; check everything, create nothing
 ./tickets.sh list                 # tickets: clean/dirty, tmux session open, commits since start, base
+./tickets.sh merge <slug>         # merge into the current branch, run check.sh, then remove
 ./tickets.sh remove <slug>        # after you merged it: removes worktree and branch
 ```
 
@@ -124,7 +125,7 @@ Or let pi write the list: in a pi session in the main checkout, run `/fanout <re
 Notes:
 - Sessions start with `pi --approve` (project trust for that run only), since each worktree is a new directory.
 - Tickets run concurrently, so `check.sh` must not depend on fixed ports or shared databases.
-- Merging is up to you, e.g. `git merge --no-ff ticket/<slug>` from the main checkout, then `./tickets.sh remove <slug>`. `remove` refuses unmerged branches, worktrees with uncommitted changes, worktrees where `SPEC.md` or `.review/` still exists (the ticket did not finish), and worktrees with a tmux pane still open in them (it cannot see sessions started with the `print` launcher).
+- Merging is up to you. `./tickets.sh merge <slug>`, run from your own shell (agents never merge; under pi it refuses), merges with `--no-ff` into the main checkout's current branch, runs `check.sh` on the result and removes the ticket if it passes. Each ticket passed the check on its own, but two tickets can break each other, so the check runs again on every merge. It refuses a dirty main checkout. On a conflict it aborts the merge, leaving the branch unchanged, and you merge that ticket by hand. If the check fails, the merge stays for you to fix, or undo it with `git reset --hard ORIG_HEAD`. By hand: `git merge --no-ff ticket/<slug> && ./check.sh && ./tickets.sh remove <slug>`. Merging on GitHub instead (squash or rebase) is not supported yet: `remove` would see the branch as unmerged. `remove` refuses unmerged branches, worktrees with uncommitted changes, worktrees where `SPEC.md` or `.review/` still exists (the ticket did not finish), and worktrees with a tmux pane still open in them (it cannot see sessions started with the `print` launcher).
 - When launched with tmux, a ticket session gets this shell's `PATH`, `BASH_ENV` and `PI_CHECK_MAX_FAILURES`, not the tmux server's (which keeps the environment it started with). Under `/fanout`, check-guard's own `BASH_ENV` hook is left out.
 - `/fanout` runs `tickets.sh` from pi, so it uses the same launcher. Set `TICKETS_LAUNCHER` in the environment pi starts from.
 
