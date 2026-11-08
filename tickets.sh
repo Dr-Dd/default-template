@@ -23,7 +23,11 @@
 # TICKETS_LAUNCHER chooses how sessions are launched:
 #   tmux   (default) one tmux window named <slug> per ticket. Inside tmux the windows go
 #          into the current session; otherwise into a detached session
-#          "<project>-tickets" that you attach to.
+#          "<project>-tickets", and a new Ghostty window attached to it opens (see
+#          TICKETS_ATTACH).
+#   TICKETS_ATTACH=0 turns that window off. It also stays off over ssh, without a
+#          desktop session, without ghostty, or when a client is already attached;
+#          then attach yourself with the printed `tmux attach` command.
 #   print  start nothing: print one command per ticket to run yourself (e.g. one
 #          terminal tab each). Needs no multiplexer.
 #
@@ -54,6 +58,8 @@ wt_base=${TICKETS_WORKTREE_DIR:-$(dirname "$main_root")/worktrees}
 wt_root="$wt_base/$project"
 pi_cmd=${TICKETS_PI_CMD:-pi}
 launcher=${TICKETS_LAUNCHER:-tmux}
+# Detached tmux session for tickets started outside tmux.
+session="$project-tickets"
 
 valid_slug() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,47}$ ]]; }
 
@@ -131,13 +137,35 @@ launch_tmux() {
 	if [[ -n ${TMUX:-} ]]; then
 		tmux new-window -d -n "$slug" -c "$dir" "$cmd"
 	else
-		local session="$project-tickets"
 		if tmux has-session -t "=$session" 2>/dev/null; then
 			tmux new-window -d -t "=$session:" -n "$slug" -c "$dir" "$cmd"
 		else
 			tmux new-session -d -s "$session" -n "$slug" -c "$dir" "$cmd"
 		fi
 	fi
+}
+
+# After launching outside tmux: open a Ghostty window attached to the tickets session,
+# so the tickets show up without attaching by hand. `ghostty +new-window` asks the
+# running Ghostty (over D-Bus) for one more window and returns right away.
+# Prints why when it doesn't open one; the caller then prints the attach command.
+open_attach_window() {
+	[[ ${TICKETS_ATTACH:-1} != 0 ]] || { echo "no window: TICKETS_ATTACH=0"; return 1; }
+	[[ -z ${SSH_CONNECTION:-} ]] || { echo "no window: running over ssh"; return 1; }
+	[[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] || { echo "no window: no desktop session"; return 1; }
+	command -v ghostty >/dev/null || { echo "no window: ghostty not found"; return 1; }
+	local attached
+	attached=$(tmux display-message -p -t "=$session:" '#{session_attached}' 2>/dev/null) || attached=0
+	if ((attached > 0)); then
+		echo "session $session is already open in a terminal"
+		return 0
+	fi
+	if ghostty +new-window -e tmux attach-session -t "=$session" >/dev/null 2>&1; then
+		echo "opened a Ghostty window attached to $session"
+		return 0
+	fi
+	echo "no window: ghostty +new-window failed"
+	return 1
 }
 
 # Gitignored installs under .pi/ that worktrees share with the main checkout through symlinks.
@@ -219,7 +247,7 @@ cmd_start() {
 
 	if [[ $launcher == tmux && -z ${TMUX:-} ]]; then
 		echo
-		echo "attach with: tmux attach -t '$project-tickets'"
+		open_attach_window || echo "attach with: tmux attach -t '$session'"
 	fi
 }
 

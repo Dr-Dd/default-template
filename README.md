@@ -65,7 +65,7 @@ Add CSV export to the reports page.
 
 For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, and launches pi with the ticket prompt. `TICKETS_LAUNCHER` chooses how:
 
-- `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session; otherwise into a detached `<project>-tickets` session that you attach to.
+- `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session. Otherwise they go into a detached `<project>-tickets` session, and a new Ghostty window attached to it opens (`ghostty +new-window`), so your current terminal and pi stay as they are. No window opens with `TICKETS_ATTACH=0`, over ssh, without a desktop session, without Ghostty, or when the session is already open in a terminal; `start` then prints the `tmux attach` command.
 - `print`: starts nothing and prints one `cd <worktree> && pi ...` command per ticket, to run yourself (e.g. one terminal tab each). Needs no multiplexer.
 
 Each session is a normal pi session following `AGENTS.md`: it stops for your spec approval and never merges. The project's `.pi/npm` and `.pi/git` are symlinked into each worktree, so packages are not reinstalled. `tickets.sh remove` deletes only the links.
