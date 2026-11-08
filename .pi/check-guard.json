@@ -1,3 +1,3 @@
 {
-  "guardedFiles": ["check.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"]
+  "guardedFiles": ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"]
 }

@@ -18,9 +18,10 @@
 #
 # For each ticket this creates branch ticket/<slug> from --base (default HEAD) in
 # $TICKETS_WORKTREE_DIR/<project>/<slug> (default: ../worktrees next to the repo),
-# writes the ticket to TICKET.md there (gitignored), and launches `pi "/<prompt> ..."`
-# in it. Each session is a normal interactive pi session that follows AGENTS.md: it
-# stops for spec approval and never merges.
+# writes the ticket to TICKET.md there (gitignored), runs worktree-setup.sh there (it must be
+# configured first, like check.sh), and launches `pi "/<prompt> ..."` in it. Each session is a
+# normal interactive pi session that follows AGENTS.md: it stops for spec approval and never
+# merges.
 #
 # TICKETS_LAUNCHER chooses how sessions are launched:
 #   tmux   (default) one tmux window named <slug> per ticket. Inside tmux the windows go
@@ -60,6 +61,8 @@ wt_base=${TICKETS_WORKTREE_DIR:-$(dirname "$main_root")/worktrees}
 wt_root="$wt_base/$project"
 pi_cmd=${TICKETS_PI_CMD:-pi}
 launcher=${TICKETS_LAUNCHER:-tmux}
+# Run in each new worktree to install what git does not track (see worktree-setup.sh).
+setup_script="$main_root/worktree-setup.sh"
 # Detached tmux session for tickets started outside tmux.
 # tmux reads "." and ":" in a target as window/pane separators, so keep only safe characters
 # (a project "my.app" gets session "my_app-tickets").
@@ -296,6 +299,10 @@ cmd_start() {
 	fi
 	git -C "$main_root" check-ignore -q TICKET.md ||
 		die "TICKET.md is not gitignored in $project; add it to .gitignore first"
+	[[ -f $setup_script ]] ||
+		die "no worktree-setup.sh in $project; copy it from the template and configure it"
+	! grep -qE '^[[:space:]]*not_configured([[:space:]]|$)' "$setup_script" ||
+		die "worktree-setup.sh is not configured: replace its 'not_configured' line with what a new worktree needs (delete the line if it needs nothing)"
 
 	# Check everything before creating anything.
 	check_wt_root_owner
@@ -340,6 +347,9 @@ cmd_start() {
 		git -C "$main_root" config "branch.ticket/$slug.ticketsBaseRef" "$base_name"
 		link_pi_packages "$dir"
 		printf '%s\n' "${bodies[i]}" >"$dir/TICKET.md"
+		echo "setting up $slug (worktree-setup.sh)"
+		(cd "$dir" && TICKETS_MAIN_ROOT=$main_root TICKETS_SLUG=$slug bash "$setup_script" </dev/null) ||
+			die "worktree-setup.sh failed for $slug"
 	done
 	created=()
 	trap - EXIT INT TERM
@@ -468,7 +478,8 @@ check_ticket_done() {
 			die "$dir/$f exists, so the ticket did not finish; finish it, or delete $f if you are sure"
 	done
 	check_no_pane "$dir"
-	# TICKET.md and the package symlinks are gitignored, so they do not count here.
+	# TICKET.md, the package symlinks and installed dependencies are gitignored, so they do not
+	# count here.
 	[[ -z $(git -C "$dir" status --porcelain) ]] ||
 		die "worktree $dir has uncommitted changes; commit or discard them first"
 }

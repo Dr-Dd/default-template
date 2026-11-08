@@ -5,6 +5,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `AGENTS.md`: agent instructions. If you also keep a global `~/.pi/agent/AGENTS.md`, pi loads it next to this one
 - `.gitignore`: common ignore rules
 - `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until you replace its placeholder steps with the project's commands
+- `worktree-setup.sh`: what a new `tickets.sh` worktree needs that git does not track (installed dependencies, `.env`, ...). It ships unconfigured, like `check.sh`, and `tickets.sh start` refuses to run until you configure it
 - `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models the pi files use, by role (see [Models](#models))
@@ -33,12 +34,12 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 
 ```json
 {
-  "guardedFiles": ["check.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json",
+  "guardedFiles": ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json",
                    "pytest.ini", "tests/**", "**/conftest.py"]
 }
 ```
 
-- `guardedFiles` (default `["check.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"]`: the check and the agent's own instructions): globs relative to the project root. Setting it replaces the default, so keep those entries when you add your own. Changing, deleting or renaming a guarded file that already exists needs your approval. Creating one depends on the entry: a file named explicitly (no glob syntax, e.g. `check.sh`) needs approval even to be created; a new file matched only by a wildcard (`tests/**`) does not, so the agent can add new test files freely. Use it for tests, fixtures, snapshot files and test runner config. Globs match files: use `dir/**` for everything inside a directory.
+- `guardedFiles` (default `["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"]`: the check, the worktree setup and the agent's own instructions): globs relative to the project root. Setting it replaces the default, so keep those entries when you add your own. Changing, deleting or renaming a guarded file that already exists needs your approval. Creating one depends on the entry: a file named explicitly (no glob syntax, e.g. `check.sh`) needs approval even to be created; a new file matched only by a wildcard (`tests/**`) does not, so the agent can add new test files freely. Use it for tests, fixtures, snapshot files and test runner config. Globs match files: use `dir/**` for everything inside a directory.
 - `.pi/check-guard.json` and the extension itself are always guarded, and creating them needs approval too, like explicitly named files.
 - The baseline is the guarded files as they were when the session started or when you last sent a message while the agent was idle. Your own edits between runs become the new baseline.
 - Files matched by a wildcard are in the baseline ("frozen") only once committed in `HEAD`. A ticket's new test files stay editable until you commit them, then they are frozen like the rest. Without a commit (or outside git) every existing guarded file is frozen.
@@ -100,12 +101,23 @@ Add CSV export to the reports page.
 ./tickets.sh remove <slug>        # after you merged it: removes worktree and branch
 ```
 
-For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, and launches pi with the ticket prompt. The worktrees are all created before any session starts; if one fails (or you press Ctrl-C), the ones already created are removed again. `TICKETS_LAUNCHER` chooses how:
+For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, runs `worktree-setup.sh` there, and launches pi with the ticket prompt. The worktrees are all created and set up before any session starts; if one fails (or you press Ctrl-C), the ones already created are removed again. `TICKETS_LAUNCHER` chooses how:
 
 - `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session. Otherwise they go into a detached `<project>-tickets` session (characters other than letters, digits, `_` and `-` become `_`), and a new Ghostty window attached to it opens (`ghostty +new-window`), so your current terminal and pi stay as they are. No window opens with `TICKETS_ATTACH=0`, over ssh, without a desktop session, without Ghostty, or when the session is already open in a terminal; `start` then prints the `tmux attach` command.
 - `print`: starts nothing and prints one `cd <worktree> && pi ...` command per ticket, to run yourself (e.g. one terminal tab each). Needs no multiplexer.
 
 Each session is a normal pi session following `AGENTS.md`: it stops for your spec approval and never merges. The project's `.pi/npm` and `.pi/git` are symlinked into each worktree, so packages are not reinstalled. `tickets.sh remove` deletes only the links.
+
+### Worktree setup
+
+A worktree holds only committed files: no `node_modules`, no `.venv`, no `.env`. Without them a ticket's first `check` fails and the session stops. `worktree-setup.sh` fills that gap. `start` runs it in each new worktree, with `TICKETS_MAIN_ROOT` (the main checkout) and `TICKETS_SLUG` set. It ships unconfigured: until you replace its `not_configured` line, `start` refuses to run. If the project needs nothing, delete the line.
+
+```bash
+cp "$TICKETS_MAIN_ROOT/.env" .env
+npm ci --prefer-offline --no-audit
+```
+
+Install dependencies from the lockfile (`npm ci`, `pnpm install --frozen-lockfile`, `uv sync --frozen`, ...) rather than symlinking or copying them from the main checkout. With a symlink, an install in one ticket would change every other ticket and the main checkout; package managers install quickly from their shared cache. Copy small untracked files such as `.env`. `copier update` does not overwrite the script, and changing it needs your approval in pi (it runs on your machine at every `start`).
 
 Or let pi write the list: in a pi session in the main checkout, run `/fanout <request>`, e.g. `/fanout fix the login bug (advised) and add CSV export`. It splits the request into tickets using your wording (no added requirements; each ticket agent details it in its own SPEC.md), checks the list with `--dry-run`, shows it to you and flags tickets that look like they change the same thing. It launches only after you approve, then stops.
 

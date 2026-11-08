@@ -67,7 +67,7 @@ const PIPE_GRACE_MS = 1000;
 /** Output kept from a check run (the tail). */
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 /** guardedFiles when there is no config file. */
-const DEFAULT_GUARDED: readonly string[] = ["check.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"];
+const DEFAULT_GUARDED: readonly string[] = ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/agents/**", ".pi/prompts/**", ".pi/settings.json"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */
 const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-guard/**"];
 /**

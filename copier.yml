@@ -9,4 +9,5 @@ _exclude:
 
 _skip_if_exists:
   - check.sh
+  - worktree-setup.sh
   - .pi/check-guard.json

@@ -7,6 +7,12 @@ predate this file and count as `1.0.0`...`13.0.0`.
 
 ### Breaking
 
+- `tickets.sh start` runs the new `worktree-setup.sh` in each new worktree and refuses to run
+  until it is configured, like `check.sh`. Copy it from the template (`copier update` adds it),
+  replace its `not_configured` line with what a worktree needs (installed dependencies, `.env`,
+  ...), or delete the line if it needs nothing.
+- check-guard: `worktree-setup.sh` is guarded by default. `copier update` does not overwrite an
+  existing `.pi/check-guard.json`: add it to its `guardedFiles` yourself.
 - check-guard: a file named explicitly in `guardedFiles` (no glob syntax, e.g. `check.sh`) now
   needs approval even to be created, like the config. Files matched only by a wildcard
   (`tests/**`) stay free to create until committed, as before.
