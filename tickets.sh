@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run several tickets in parallel: one git worktree, branch and tmux window per ticket.
+# Run several tickets in parallel: one git worktree, branch and pi session per ticket.
 #
 #   ./tickets.sh start [--prompt solo|advised] [--base REF] [--dry-run] FILE|-
 #   ./tickets.sh list
@@ -16,11 +16,16 @@
 #
 # For each ticket this creates branch ticket/<slug> from --base (default HEAD) in
 # $TICKETS_WORKTREE_DIR/<project>/<slug> (default: ../worktrees next to the repo),
-# writes the ticket to TICKET.md there (gitignored), and opens a tmux window named
-# <slug> running `pi "/<prompt> ..."`. Each window is a normal interactive pi session
-# that follows AGENTS.md: it stops for spec approval and never merges.
-# Inside tmux the windows go into the current session; otherwise into a detached
-# session "<project>-tickets" that you attach to.
+# writes the ticket to TICKET.md there (gitignored), and launches `pi "/<prompt> ..."`
+# in it. Each session is a normal interactive pi session that follows AGENTS.md: it
+# stops for spec approval and never merges.
+#
+# TICKETS_LAUNCHER chooses how sessions are launched:
+#   tmux   (default) one tmux window named <slug> per ticket. Inside tmux the windows go
+#          into the current session; otherwise into a detached session
+#          "<project>-tickets" that you attach to.
+#   print  start nothing: print one command per ticket to run yourself (e.g. one
+#          terminal tab each). Needs no multiplexer.
 #
 # --dry-run runs every check and prints what would start, without creating anything.
 # The /fanout prompt uses it to validate a ticket list before you confirm.
@@ -48,6 +53,7 @@ project=$(basename "$main_root")
 wt_base=${TICKETS_WORKTREE_DIR:-$(dirname "$main_root")/worktrees}
 wt_root="$wt_base/$project"
 pi_cmd=${TICKETS_PI_CMD:-pi}
+launcher=${TICKETS_LAUNCHER:-tmux}
 
 valid_slug() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,47}$ ]]; }
 
@@ -90,13 +96,38 @@ parse_tickets() {
 	done
 }
 
-open_window() {
-	local slug=$1 dir=$2 prompt=$3
+# Quote for bash and zsh: wrap in single quotes, escaping embedded ones.
+shell_quote() {
+	local q="'\\''"
+	printf "'%s'" "${1//\'/$q}"
+}
+
+# The pi command for a ticket, to run inside its worktree.
+# PI_TICKET goes on the command, not `tmux -e`: new-session -e would set it for the
+# whole tmux session.
+pi_command() {
+	local slug=$1 prompt=$2
 	local msg="/$prompt My ticket text is in TICKET.md at the repository root (I launched this session with tickets.sh). Read it first; it is the ticket."
+	printf 'PI_TICKET=%s %s --approve %s' "$(shell_quote "$slug")" "$(shell_quote "$pi_cmd")" "$(shell_quote "$msg")"
+}
+
+launch() {
+	case $launcher in
+	tmux) launch_tmux "$@" ;;
+	print) launch_print "$@" ;;
+	esac
+}
+
+launch_print() {
+	local slug=$1 dir=$2 prompt=$3
+	printf '  cd %s && %s\n' "$(shell_quote "$dir")" "$(pi_command "$slug" "$prompt")"
+}
+
+launch_tmux() {
+	local slug=$1 dir=$2 prompt=$3
 	local cmd
-	# PI_TICKET goes on the command, not `tmux -e`: new-session -e would set it for the
-	# whole tmux session. Keep the window open in a shell in the worktree after pi exits.
-	printf -v cmd 'PI_TICKET=%q %q --approve %q; exec "${SHELL:-bash}"' "$slug" "$pi_cmd" "$msg"
+	# Keep the window open in a shell in the worktree after pi exits.
+	cmd="$(pi_command "$slug" "$prompt"); exec \"\${SHELL:-bash}\""
 	if [[ -n ${TMUX:-} ]]; then
 		tmux new-window -d -n "$slug" -c "$dir" "$cmd"
 	else
@@ -138,7 +169,12 @@ cmd_start() {
 	done
 	[[ -n $file ]] || usage
 	[[ $file == - || -f $file ]] || die "no such file: $file"
-	((dry_run)) || command -v tmux >/dev/null || die "tmux not found"
+	case $launcher in
+	tmux) ((dry_run)) || command -v tmux >/dev/null ||
+		die "tmux not found; install it or set TICKETS_LAUNCHER=print" ;;
+	print) ;;
+	*) die "unknown TICKETS_LAUNCHER '$launcher' (use tmux or print)" ;;
+	esac
 
 	parse_tickets "$file" "$default_prompt"
 
@@ -162,7 +198,7 @@ cmd_start() {
 		for i in "${!slugs[@]}"; do
 			echo "would start ${slugs[i]} (/${prompts[i]}) on ticket/${slugs[i]} in $wt_root/${slugs[i]}"
 		done
-		echo "dry run: all checks passed, nothing created"
+		echo "dry run: all checks passed, nothing created (launcher: $launcher)"
 		return 0
 	fi
 
@@ -172,11 +208,16 @@ cmd_start() {
 		git -C "$main_root" worktree add --quiet -b "ticket/$slug" "$dir" "$base_commit"
 		link_pi_packages "$dir"
 		printf '%s\n' "${bodies[i]}" >"$dir/TICKET.md"
-		open_window "$slug" "$dir" "${prompts[i]}"
-		echo "started $slug (/${prompts[i]}) on ticket/$slug in $dir"
+		if [[ $launcher == print ]]; then
+			echo "created $slug (/${prompts[i]}) on ticket/$slug in $dir; start it with:"
+			launch "$slug" "$dir" "${prompts[i]}"
+		else
+			launch "$slug" "$dir" "${prompts[i]}"
+			echo "started $slug (/${prompts[i]}) on ticket/$slug in $dir"
+		fi
 	done
 
-	if [[ -z ${TMUX:-} ]]; then
+	if [[ $launcher == tmux && -z ${TMUX:-} ]]; then
 		echo
 		echo "attach with: tmux attach -t '$project-tickets'"
 	fi

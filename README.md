@@ -63,7 +63,12 @@ Add CSV export to the reports page.
 ./tickets.sh remove <slug>        # after you merged it: removes worktree and branch
 ```
 
-For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, and opens a tmux window running pi with the ticket prompt. Inside tmux the windows go into your current session; otherwise into a detached `<project>-tickets` session. Each window is a normal pi session following `AGENTS.md`: it stops for your spec approval and never merges. The project's `.pi/npm` and `.pi/git` are symlinked into each worktree, so packages are not reinstalled. `tickets.sh remove` deletes only the links.
+For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, and launches pi with the ticket prompt. `TICKETS_LAUNCHER` chooses how:
+
+- `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session; otherwise into a detached `<project>-tickets` session that you attach to.
+- `print`: starts nothing and prints one `cd <worktree> && pi ...` command per ticket, to run yourself (e.g. one terminal tab each). Needs no multiplexer.
+
+Each session is a normal pi session following `AGENTS.md`: it stops for your spec approval and never merges. The project's `.pi/npm` and `.pi/git` are symlinked into each worktree, so packages are not reinstalled. `tickets.sh remove` deletes only the links.
 
 Or let pi write the list: in a pi session in the main checkout, run `/fanout <request>`, e.g. `/fanout fix the login bug (advised) and add CSV export`. It splits the request into tickets using your wording (no added requirements; each ticket agent details it in its own SPEC.md), checks the list with `--dry-run`, shows it to you and flags tickets that look like they change the same thing. It launches only after you approve, then stops.
 
@@ -71,3 +76,9 @@ Notes:
 - Sessions start with `pi --approve` (project trust for that run only), since each worktree is a new directory.
 - Tickets run concurrently, so `check.sh` must not depend on fixed ports or shared databases.
 - Merging is up to you, e.g. `git merge --no-ff ticket/<slug>` from the main checkout, then `./tickets.sh remove <slug>`. `remove` refuses unmerged branches and worktrees with uncommitted changes.
+- `/fanout` runs `tickets.sh` from pi, so it uses the same launcher. Set `TICKETS_LAUNCHER` in the environment pi starts from.
+
+## TODO
+
+- **Run ticket sessions in an isolated environment.** Ticket sessions run `pi --approve` with arbitrary bash and can currently reach the whole home directory (ssh keys, credentials, browser profiles). Plan: a rootless podman container with only the worktree mounted (not distrobox, which shares `$HOME`), tmux inside it, and a `tickets.sh` launcher for it. To solve first: logins inside the container (the Claude CLI used by `pi-claude-code`; narrow git credentials, no personal ssh keys), getting branches out (push from the container or share the git directory), and each project's `check.sh` toolchain in the image. Later, the same setup could move to a VM or remote box.
+- **Trial herdr as the ticket session host.** Try [herdr](https://herdr.dev) (`herdr integration install pi`) for a real batch of tickets, with `[update] version_check = false` and `manifest_check = false` in its config. If it stays, add a `herdr` launcher to `tickets.sh` (one tab per ticket via `herdr tab create --cwd ... --label ...`; first confirm how the CLI starts a command in a new tab). Then `~/.pi/agent/extensions/tmux-status.ts` is no longer needed for tickets.
