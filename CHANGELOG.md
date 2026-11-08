@@ -44,6 +44,38 @@ predate this file and count as `1.0.0`...`13.0.0`.
   check.sh" in README.md.
 - check-guard: `guardedFiles` entries starting with `./` (e.g. `./check.sh`) matched nothing, so
   the file was not guarded. The prefix is now ignored.
+- `tickets.sh`: slugs that git rejects as branch names (`a..b`, `x.lock`, `x.`) are refused while
+  parsing, so `--dry-run` catches them. Before, they passed the checks and `start` failed halfway.
+- `tickets.sh start` creates every worktree before launching any session. If creating one fails
+  or you press Ctrl-C, the worktrees and branches it already created are removed again (a branch
+  with commits on it is kept). A worktree deleted by hand but still registered is reported
+  before anything is created.
+- `tickets.sh remove` refuses while `SPEC.md` or `.review/` exists in the worktree (the ticket
+  did not finish; both are gitignored, so they used to be deleted silently), while a tmux pane is
+  open in the worktree, or when run from inside it.
+- `tickets.sh`: tmux-launched sessions get the `PATH`, `BASH_ENV` and `PI_CHECK_MAX_FAILURES` of
+  the shell that ran `start`, not the stale environment of the tmux server. Started from pi
+  (`/fanout`), they no longer inherit check-guard's `BASH_ENV` hook.
+- `tickets.sh`: a project directory with `.` or `:` in its name (`my.app`) broke the tmux
+  launcher: tmux read the dot in the session name as a window separator, so a second `start`
+  failed with "duplicate session". The session name now replaces such characters with `_`
+  (`my_app-tickets`).
+- `tickets.sh start`: if a session fails to launch, the remaining tickets still start, and the
+  tickets left without a session are listed at the end with the command to start each by hand.
+  `start` then exits non-zero. Before, it stopped at the first failure with only tmux's error.
+- `tickets.sh list` counts each ticket's commits since it started (the base `start` used, stored
+  in the branch's git config) instead of commits ahead of whatever the main checkout has checked
+  out, so the numbers no longer change when you switch branches. It also shows the base
+  (`main@1a2b3c4`) and a SESSION column: `open` when a tmux pane is in the worktree.
+- `tickets.sh start` refuses when the worktree directory already holds worktrees of another
+  repository with the same directory name (shared `TICKETS_WORKTREE_DIR`), and reports a branch
+  named `ticket` (or `ticket/<slug>/...`) that would block the ticket branches, instead of failing
+  halfway.
+
+### Removed
+
+- `tickets.sh`: the unused `PI_TICKET` variable (its reader, `ticket-status.ts`, was removed
+  earlier).
 
 ## v14.0.0 (2026-11-08)
 

@@ -2,8 +2,9 @@
 # Run several tickets in parallel: one git worktree, branch and pi session per ticket.
 #
 #   ./tickets.sh start [--prompt solo|advised] [--base REF] [--dry-run] FILE|-
-#   ./tickets.sh list
-#   ./tickets.sh remove SLUG      (after you merged it: removes worktree and branch)
+#   ./tickets.sh list             (status, open tmux session, commits since the ticket started)
+#   ./tickets.sh remove SLUG      (after you merged it: removes worktree and branch; refuses
+#                                  while SPEC.md or .review/ exists or a tmux pane is open there)
 #
 # FILE (or stdin with "-") holds one ticket per "## ticket: <slug> [prompt]" line; the text below it
 # (up to the next "## ticket:" line) is the ticket. Other lines, including "## " headings, are
@@ -46,7 +47,7 @@ die() {
 }
 
 usage() {
-	sed -n '2,6p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,7p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	exit "${1:-1}"
 }
 
@@ -60,9 +61,16 @@ wt_root="$wt_base/$project"
 pi_cmd=${TICKETS_PI_CMD:-pi}
 launcher=${TICKETS_LAUNCHER:-tmux}
 # Detached tmux session for tickets started outside tmux.
-session="$project-tickets"
+# tmux reads "." and ":" in a target as window/pane separators, so keep only safe characters
+# (a project "my.app" gets session "my_app-tickets").
+session="${project//[^A-Za-z0-9_-]/_}-tickets"
 
-valid_slug() { [[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,47}$ ]]; }
+# The character set keeps slugs readable; check-ref-format rejects the rest git refuses as a
+# branch name ("..", a trailing "." or ".lock", ...).
+valid_slug() {
+	[[ $1 =~ ^[a-z0-9][a-z0-9._-]{0,47}$ ]] &&
+		git check-ref-format --branch "ticket/$1" >/dev/null 2>&1
+}
 
 # Parse FILE into parallel arrays slugs/prompts/bodies.
 parse_tickets() {
@@ -83,7 +91,8 @@ parse_tickets() {
 		if [[ $line =~ ^##[[:space:]]+ticket:[[:space:]]*([^[:space:]]+)([[:space:]]+([^[:space:]]+))?[[:space:]]*$ ]]; then
 			flush
 			slug=${BASH_REMATCH[1]} prompt=${BASH_REMATCH[3]:-$default_prompt} body="" in_ticket=1
-			valid_slug "$slug" || die "invalid slug '$slug' (use lowercase letters, digits, . _ -)"
+			valid_slug "$slug" ||
+				die "invalid slug '$slug' (use lowercase letters, digits, . _ -; no '..', no trailing '.' or '.lock')"
 		elif ((in_ticket)); then
 			body+="$line"$'\n'
 		elif [[ -n ${line//[[:space:]]/} ]]; then
@@ -109,13 +118,30 @@ shell_quote() {
 	printf "'%s'" "${1//\'/$q}"
 }
 
+# `env` arguments that give a tmux-launched session this shell's environment where it matters.
+# tmux starts windows with the environment its server had when it started, not this shell's,
+# so an activated venv/nvm (PATH) or a changed variable would otherwise not reach the ticket.
+# Run from pi (/fanout), check-guard's BASH_ENV hook is set for this script: hand the session
+# the BASH_ENV pi itself was started with instead, and drop check-guard's variables.
+session_env() {
+	local bash_env=${BASH_ENV-} unset=(-u PI_CHECK_GUARD_ROOT -u PI_CHECK_GUARD_BASH_ENV) set=("PATH=$PATH") a out=""
+	[[ -z ${PI_CHECK_GUARD_ROOT-} ]] || bash_env=${PI_CHECK_GUARD_BASH_ENV-}
+	if [[ -n $bash_env ]]; then set+=("BASH_ENV=$bash_env"); else unset+=(-u BASH_ENV); fi
+	if [[ -n ${PI_CHECK_MAX_FAILURES+x} ]]; then
+		set+=("PI_CHECK_MAX_FAILURES=$PI_CHECK_MAX_FAILURES")
+	else
+		unset+=(-u PI_CHECK_MAX_FAILURES)
+	fi
+	# env takes options only before the first NAME=VALUE.
+	for a in "${unset[@]}" "${set[@]}"; do out+=" $(shell_quote "$a")"; done
+	printf 'env%s' "$out"
+}
+
 # The pi command for a ticket, to run inside its worktree.
-# PI_TICKET goes on the command, not `tmux -e`: new-session -e would set it for the
-# whole tmux session.
 pi_command() {
-	local slug=$1 prompt=$2
+	local prompt=$1
 	local msg="/$prompt My ticket text is in TICKET.md at the repository root (I launched this session with tickets.sh). Read it first; it is the ticket."
-	printf 'PI_TICKET=%s %s --approve %s' "$(shell_quote "$slug")" "$(shell_quote "$pi_cmd")" "$(shell_quote "$msg")"
+	printf '%s --approve %s' "$(shell_quote "$pi_cmd")" "$(shell_quote "$msg")"
 }
 
 launch() {
@@ -127,14 +153,14 @@ launch() {
 
 launch_print() {
 	local slug=$1 dir=$2 prompt=$3
-	printf '  cd %s && %s\n' "$(shell_quote "$dir")" "$(pi_command "$slug" "$prompt")"
+	printf '  cd %s && %s\n' "$(shell_quote "$dir")" "$(pi_command "$prompt")"
 }
 
 launch_tmux() {
 	local slug=$1 dir=$2 prompt=$3
 	local cmd
 	# Keep the window open in a shell in the worktree after pi exits.
-	cmd="$(pi_command "$slug" "$prompt"); exec \"\${SHELL:-bash}\""
+	cmd="$(session_env) $(pi_command "$prompt"); exec \"\${SHELL:-bash}\""
 	if [[ -n ${TMUX:-} ]]; then
 		tmux new-window -d -n "$slug" -c "$dir" "$cmd"
 	else
@@ -183,6 +209,57 @@ link_pi_packages() {
 	done
 }
 
+# Refuse if $wt_root already holds worktrees of another repository: two projects with the same
+# directory name and a shared TICKETS_WORKTREE_DIR would otherwise mix their tickets.
+check_wt_root_owner() {
+	[[ -d $wt_root ]] || return 0
+	local entry other
+	for entry in "$wt_root"/*/; do
+		[[ -e $entry.git ]] || continue
+		other=$(git -C "$entry" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || continue
+		[[ $other -ef $common_dir ]] ||
+			die "$wt_root holds worktrees of another repository ($(dirname "$other")); set TICKETS_WORKTREE_DIR to a different directory for one of them"
+	done
+}
+
+# Slugs whose branch/worktree this run is creating, for rollback_created.
+created=()
+base_commit=""
+created_wt_root=0
+
+# Undo a start that failed (or was interrupted) before any session launched. Removes only what
+# this run created: the pre-checks guarantee none of these branches or paths existed before.
+rollback_created() {
+	local slug dir sub
+	((${#created[@]})) || return 0
+	set +e
+	echo "tickets: start failed; rolling back ${#created[@]} ticket(s)" >&2
+	for slug in "${created[@]}"; do
+		dir="$wt_root/$slug"
+		if [[ -d $dir ]]; then
+			for sub in "${pi_installs[@]}"; do
+				if [[ -L "$dir/.pi/$sub" ]]; then rm "$dir/.pi/$sub"; fi
+			done
+			# --force: the fresh worktree holds only TICKET.md, which is untracked.
+			git -C "$main_root" worktree remove --force "$dir" >/dev/null 2>&1 ||
+				echo "tickets: could not remove $dir; remove it by hand" >&2
+		fi
+		# git can leave the branch behind when `worktree add -b` fails. Delete it only if it
+		# still points at the base commit, i.e. nothing was committed on it.
+		local head
+		head=$(git -C "$main_root" rev-parse --verify --quiet "refs/heads/ticket/$slug")
+		if [[ $head == "$base_commit" ]]; then
+			git -C "$main_root" branch -D "ticket/$slug" >/dev/null 2>&1 ||
+				echo "tickets: could not delete branch ticket/$slug" >&2
+		elif [[ -n $head ]]; then
+			echo "tickets: kept branch ticket/$slug: it has commits not in the base" >&2
+		fi
+		echo "tickets: rolled back $slug" >&2
+	done
+	if ((created_wt_root)); then rmdir "$wt_root" 2>/dev/null; fi
+	created=()
+}
+
 cmd_start() {
 	local default_prompt=solo base=HEAD file="" dry_run=0
 	while (($#)); do
@@ -207,8 +284,13 @@ cmd_start() {
 
 	parse_tickets "$file" "$default_prompt"
 
-	local base_commit
 	base_commit=$(git -C "$main_root" rev-parse --verify --quiet "$base^{commit}") || die "unknown ref '$base'"
+	# A readable name for the base, for `list`: the branch for HEAD, else the ref as given.
+	local base_name=$base
+	if [[ $base == HEAD ]]; then
+		base_name=$(git -C "$main_root" branch --show-current)
+		[[ -n $base_name ]] || base_name=HEAD
+	fi
 	if ! git -C "$main_root" diff --quiet HEAD -- 2>/dev/null; then
 		echo "tickets: warning: uncommitted changes in $main_root are not part of the tickets" >&2
 	fi
@@ -216,11 +298,22 @@ cmd_start() {
 		die "TICKET.md is not gitignored in $project; add it to .gitignore first"
 
 	# Check everything before creating anything.
+	check_wt_root_owner
+	# git stores branches as files under refs/heads/: a branch named exactly "ticket" is a file
+	# where the ticket/ folder would go, so no ticket/<slug> branch can be created.
+	! git -C "$main_root" show-ref --verify --quiet refs/heads/ticket ||
+		die "a branch named 'ticket' exists, so no ticket/<slug> branch can be created; rename it (git branch -m ticket <new-name>)"
 	local i slug dir
 	for slug in "${slugs[@]}"; do
+		# Same in reverse: an existing ticket/<slug>/... branch blocks ticket/<slug>.
+		[[ -z $(git -C "$main_root" for-each-ref --count=1 --format=x "refs/heads/ticket/$slug/") ]] ||
+			die "branches under ticket/$slug/ exist, so branch ticket/$slug cannot be created; rename them or choose another slug"
 		git -C "$main_root" show-ref --verify --quiet "refs/heads/ticket/$slug" &&
 			die "branch ticket/$slug already exists"
 		[[ ! -e "$wt_root/$slug" ]] || die "$wt_root/$slug already exists"
+		# A worktree deleted by hand stays registered until pruned, and `worktree add` refuses it.
+		! git -C "$main_root" worktree list --porcelain | grep -qxF "worktree $wt_root/$slug" ||
+			die "$wt_root/$slug is still registered as a worktree; run 'git worktree prune' first"
 	done
 
 	if ((dry_run)); then
@@ -231,61 +324,163 @@ cmd_start() {
 		return 0
 	fi
 
+	# Phase 1: create every worktree. Any failure (or Ctrl-C) rolls back all of them, so a
+	# start either sets up every ticket or none.
+	trap rollback_created EXIT
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+	[[ -d $wt_root ]] || created_wt_root=1
 	mkdir -p "$wt_root"
 	for i in "${!slugs[@]}"; do
 		slug=${slugs[i]} dir="$wt_root/$slug"
+		created+=("$slug")
 		git -C "$main_root" worktree add --quiet -b "ticket/$slug" "$dir" "$base_commit"
+		# Remembered for `list`; git deletes branch config together with the branch.
+		git -C "$main_root" config "branch.ticket/$slug.ticketsBase" "$base_commit"
+		git -C "$main_root" config "branch.ticket/$slug.ticketsBaseRef" "$base_name"
 		link_pi_packages "$dir"
 		printf '%s\n' "${bodies[i]}" >"$dir/TICKET.md"
+	done
+	created=()
+	trap - EXIT INT TERM
+
+	# Phase 2: launch. Sessions that started are not undone if a later launch fails: a failed
+	# launch is reported and the rest still start. Its worktree stays, to start by hand or remove.
+	local not_started=()
+	for i in "${!slugs[@]}"; do
+		slug=${slugs[i]} dir="$wt_root/$slug"
 		if [[ $launcher == print ]]; then
 			echo "created $slug (/${prompts[i]}) on ticket/$slug in $dir; start it with:"
 			launch "$slug" "$dir" "${prompts[i]}"
-		else
-			launch "$slug" "$dir" "${prompts[i]}"
+		elif launch "$slug" "$dir" "${prompts[i]}"; then
 			echo "started $slug (/${prompts[i]}) on ticket/$slug in $dir"
+		else
+			echo "tickets: could not start a session for $slug (error above)" >&2
+			not_started+=("$i")
 		fi
 	done
+	if ((${#not_started[@]})); then
+		echo >&2
+		echo "tickets: ${#not_started[@]} ticket(s) were created but not started. Start each by hand, or remove it with ./tickets.sh remove <slug>:" >&2
+		for i in "${not_started[@]}"; do
+			launch_print "${slugs[i]}" "$wt_root/${slugs[i]}" "${prompts[i]}" >&2
+		done
+	fi
 
-	if [[ $launcher == tmux && -z ${TMUX:-} ]]; then
+	if [[ $launcher == tmux && -z ${TMUX:-} ]] && ((${#not_started[@]} < ${#slugs[@]})); then
 		echo
 		open_attach_window || echo "attach with: tmux attach -t '$session'"
 	fi
+	# Non-zero so callers (/fanout) notice; the worktrees above are kept either way.
+	((${#not_started[@]} == 0))
+}
+
+# Where a ticket started: the commit and ref name `start` stored in the branch's config (git
+# deletes it with the branch). Tickets started before that fall back to the merge base with the
+# main checkout's HEAD. Prints "<commit> <ref>".
+ticket_base() {
+	local slug=$1 commit ref
+	commit=$(git -C "$main_root" config --get "branch.ticket/$slug.ticketsBase" 2>/dev/null) || commit=""
+	ref=$(git -C "$main_root" config --get "branch.ticket/$slug.ticketsBaseRef" 2>/dev/null) || ref=""
+	if [[ -z $commit ]]; then
+		commit=$(git -C "$main_root" merge-base HEAD "ticket/$slug" 2>/dev/null) || commit=""
+		ref=""
+	fi
+	printf '%s %s' "${commit:-?}" "${ref:-?}"
 }
 
 cmd_list() {
-	local path="" branch="" line
-	printf '%-24s %-10s %s\n' TICKET STATUS WORKTREE
+	local path="" branch="" line panes="" have_tmux=0
+	# Working directories of all tmux panes, read once (none if no server runs). Without tmux the
+	# session column shows "?". Sessions started with TICKETS_LAUNCHER=print are never visible.
+	if command -v tmux >/dev/null; then
+		have_tmux=1
+		panes=$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null) || panes=""
+	fi
+	printf '%-24s %-7s %-8s %-8s %-24s %s\n' TICKET STATUS SESSION COMMITS BASE WORKTREE
 	while IFS= read -r line; do
 		case $line in
 		"worktree "*) path=${line#worktree } branch="" ;;
 		"branch refs/heads/ticket/"*) branch=${line#branch refs/heads/ticket/} ;;
 		"")
 			if [[ -n $branch ]]; then
-				local status=clean
+				local status=clean session="?" base commit ref commits
 				[[ -z $(git -C "$path" status --porcelain 2>/dev/null) ]] || status=dirty
-				local ahead
-				ahead=$(git -C "$main_root" rev-list --count "HEAD..ticket/$branch" 2>/dev/null || echo "?")
-				printf '%-24s %-10s %s (%s commits ahead of HEAD)\n' "$branch" "$status" "$path" "$ahead"
+				if ((have_tmux)); then
+					session=-
+					panes_in "$path" <<<"$panes" && session=open
+				fi
+				base=$(ticket_base "$branch") commit=${base%% *} ref=${base#* }
+				# Commits on the ticket since it started: the same whatever the main checkout has
+				# checked out now.
+				commits=$(git -C "$main_root" rev-list --count "$commit..ticket/$branch" 2>/dev/null) || commits="?"
+				[[ $commit == "?" ]] || commit=${commit:0:7}
+				printf '%-24s %-7s %-8s %-8s %-24s %s\n' "$branch" "$status" "$session" "$commits" "$ref@$commit" "$path"
 			fi
 			path="" branch=""
 			;;
 		esac
 	done < <(git -C "$main_root" worktree list --porcelain; echo)
+	printf '\nSESSION: open = a tmux pane is in the worktree, - = none (sessions not run in tmux are not seen).\n'
+	printf 'COMMITS: commits on the ticket since it started from BASE (ref@commit).\n'
+}
+
+# True if a path read from stdin (one per line) is dir or inside it.
+panes_in() {
+	local dir
+	dir=$(cd "$1" 2>/dev/null && pwd -P) || return 1
+	D=$dir awk '$0 == ENVIRON["D"] || index($0, ENVIRON["D"] "/") == 1 { found = 1 } END { exit !found }'
+}
+
+# Refuse while a tmux pane (pi, or the shell left after it) has its working directory inside the
+# worktree: removing it would leave that session in a deleted directory. Only tmux panes are
+# visible here; sessions started with TICKETS_LAUNCHER=print are not.
+check_no_pane() {
+	local dir here
+	dir=$(cd "$1" && pwd -P)
+	here=$(pwd -P)
+	if [[ $here == "$dir" || $here == "$dir"/* ]]; then
+		die "you are inside $1; run remove from the main checkout"
+	fi
+	command -v tmux >/dev/null || return 0
+	if tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null | panes_in "$dir"; then
+		die "a tmux pane is still open in $1; quit pi there and close the window first"
+	fi
+}
+
+# The slug argument of remove: valid, with an existing ticket branch.
+check_slug_arg() {
+	local slug=$1
+	[[ -n $slug ]] || usage
+	valid_slug "$slug" || die "invalid slug '$slug'"
+	git -C "$main_root" show-ref --verify --quiet "refs/heads/ticket/$slug" ||
+		die "no branch ticket/$slug"
+}
+
+# Refuse while the ticket's worktree (if it still exists) holds unfinished work or an open session.
+check_ticket_done() {
+	local dir=$1 f
+	[[ -d $dir ]] || return 0
+	# AGENTS.md deletes SPEC.md and .review/ only after the ticket's commit succeeded. Both are
+	# gitignored, so the status check below would not see them.
+	for f in SPEC.md .review; do
+		[[ ! -e $dir/$f ]] ||
+			die "$dir/$f exists, so the ticket did not finish; finish it, or delete $f if you are sure"
+	done
+	check_no_pane "$dir"
+	# TICKET.md and the package symlinks are gitignored, so they do not count here.
+	[[ -z $(git -C "$dir" status --porcelain) ]] ||
+		die "worktree $dir has uncommitted changes; commit or discard them first"
 }
 
 cmd_remove() {
 	local slug=${1:-}
-	[[ -n $slug ]] || usage
-	valid_slug "$slug" || die "invalid slug '$slug'"
+	check_slug_arg "$slug"
 	local dir="$wt_root/$slug"
-	git -C "$main_root" show-ref --verify --quiet "refs/heads/ticket/$slug" ||
-		die "no branch ticket/$slug"
 	git -C "$main_root" merge-base --is-ancestor "ticket/$slug" HEAD ||
 		die "ticket/$slug is not merged into $(git -C "$main_root" branch --show-current); merge it first"
+	check_ticket_done "$dir"
 	if [[ -d $dir ]]; then
-		# TICKET.md and the package symlinks are gitignored, so they do not count here.
-		[[ -z $(git -C "$dir" status --porcelain) ]] ||
-			die "worktree $dir has uncommitted changes; commit or discard them first"
 		local sub
 		for sub in "${pi_installs[@]}"; do
 			# rm on a symlink removes only the link, never the shared install.

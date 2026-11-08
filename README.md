@@ -96,13 +96,13 @@ Add CSV export to the reports page.
 ```sh
 ./tickets.sh start tickets.md     # --prompt advised, --base <ref> to change defaults
 ./tickets.sh start --dry-run - < tickets.md   # read stdin; check everything, create nothing
-./tickets.sh list                 # ticket branches, clean/dirty, commits ahead
+./tickets.sh list                 # tickets: clean/dirty, tmux session open, commits since start, base
 ./tickets.sh remove <slug>        # after you merged it: removes worktree and branch
 ```
 
-For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, and launches pi with the ticket prompt. `TICKETS_LAUNCHER` chooses how:
+For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, and launches pi with the ticket prompt. The worktrees are all created before any session starts; if one fails (or you press Ctrl-C), the ones already created are removed again. `TICKETS_LAUNCHER` chooses how:
 
-- `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session. Otherwise they go into a detached `<project>-tickets` session, and a new Ghostty window attached to it opens (`ghostty +new-window`), so your current terminal and pi stay as they are. No window opens with `TICKETS_ATTACH=0`, over ssh, without a desktop session, without Ghostty, or when the session is already open in a terminal; `start` then prints the `tmux attach` command.
+- `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session. Otherwise they go into a detached `<project>-tickets` session (characters other than letters, digits, `_` and `-` become `_`), and a new Ghostty window attached to it opens (`ghostty +new-window`), so your current terminal and pi stay as they are. No window opens with `TICKETS_ATTACH=0`, over ssh, without a desktop session, without Ghostty, or when the session is already open in a terminal; `start` then prints the `tmux attach` command.
 - `print`: starts nothing and prints one `cd <worktree> && pi ...` command per ticket, to run yourself (e.g. one terminal tab each). Needs no multiplexer.
 
 Each session is a normal pi session following `AGENTS.md`: it stops for your spec approval and never merges. The project's `.pi/npm` and `.pi/git` are symlinked into each worktree, so packages are not reinstalled. `tickets.sh remove` deletes only the links.
@@ -112,7 +112,8 @@ Or let pi write the list: in a pi session in the main checkout, run `/fanout <re
 Notes:
 - Sessions start with `pi --approve` (project trust for that run only), since each worktree is a new directory.
 - Tickets run concurrently, so `check.sh` must not depend on fixed ports or shared databases.
-- Merging is up to you, e.g. `git merge --no-ff ticket/<slug>` from the main checkout, then `./tickets.sh remove <slug>`. `remove` refuses unmerged branches and worktrees with uncommitted changes.
+- Merging is up to you, e.g. `git merge --no-ff ticket/<slug>` from the main checkout, then `./tickets.sh remove <slug>`. `remove` refuses unmerged branches, worktrees with uncommitted changes, worktrees where `SPEC.md` or `.review/` still exists (the ticket did not finish), and worktrees with a tmux pane still open in them (it cannot see sessions started with the `print` launcher).
+- When launched with tmux, a ticket session gets this shell's `PATH`, `BASH_ENV` and `PI_CHECK_MAX_FAILURES`, not the tmux server's (which keeps the environment it started with). Under `/fanout`, check-guard's own `BASH_ENV` hook is left out.
 - `/fanout` runs `tickets.sh` from pi, so it uses the same launcher. Set `TICKETS_LAUNCHER` in the environment pi starts from.
 
 ## Versioning
