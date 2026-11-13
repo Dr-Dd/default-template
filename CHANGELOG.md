@@ -8,6 +8,17 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+## v0.17.0 (2026-11-13)
+
+### Changed
+
+- tickets.sh: the attach window opened outside tmux uses `$TERMINAL`, else the first found of
+  ghostty, kitty, alacritty, foot, wezterm, konsole, gnome-terminal, xterm, instead of
+  requiring Ghostty.
+- `.pi/settings.json`: `pi-claude-code` now loads from the fork `github.com/Dr-Dd/pi-claude-code`
+  pinned to commit `c9c824d` (closes tool calls left without results before replay), instead of
+  upstream `earendil-works/pi-claude-code`.
+
 ## v0.16.0 (2026-11-08)
 
 ### Breaking
