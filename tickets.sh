@@ -27,11 +27,13 @@
 # TICKETS_LAUNCHER chooses how sessions are launched:
 #   tmux   (default) one tmux window named <slug> per ticket. Inside tmux the windows go
 #          into the current session; otherwise into a detached session
-#          "<project>-tickets", and a new Ghostty window attached to it opens (see
-#          TICKETS_ATTACH).
+#          "<project>-tickets", and a new terminal window attached to it opens (see
+#          TICKETS_ATTACH). The terminal is $TERMINAL (a command name or path; any
+#          arguments in it are ignored), else the first found of: ghostty kitty
+#          alacritty foot wezterm konsole gnome-terminal xterm.
 #   TICKETS_ATTACH=0 turns that window off. It also stays off over ssh, without a
-#          desktop session, without ghostty, or when a client is already attached;
-#          then attach yourself with the printed `tmux attach` command.
+#          desktop session, without a terminal found, or when a client is already
+#          attached; then attach yourself with the printed `tmux attach` command.
 #   print  start nothing: print one command per ticket to run yourself (e.g. one
 #          terminal tab each). Needs no multiplexer.
 #
@@ -176,26 +178,75 @@ launch_tmux() {
 	fi
 }
 
-# After launching outside tmux: open a Ghostty window attached to the tickets session,
-# so the tickets show up without attaching by hand. `ghostty +new-window` asks the
-# running Ghostty (over D-Bus) for one more window and returns right away.
+# The terminal for the attach window: $TERMINAL (the user's preferred terminal; not $TERM,
+# which is a terminfo name such as "xterm-kitty"), else the first known one on PATH.
+# Arguments in $TERMINAL ("kitty --single-instance") are dropped: each terminal needs its
+# own way of being given a command, chosen by name in open_attach_window.
+pick_terminal() {
+	local term=${TERMINAL:-} candidate
+	if [[ -n $term ]]; then
+		term=${term%%[[:space:]]*}
+		command -v "$term" >/dev/null || { echo "no window: \$TERMINAL '$term' not found"; return 1; }
+		printf '%s' "$term"
+		return 0
+	fi
+	for candidate in ghostty kitty alacritty foot wezterm konsole gnome-terminal xterm; do
+		if command -v "$candidate" >/dev/null; then
+			printf '%s' "$candidate"
+			return 0
+		fi
+	done
+	echo "no window: no terminal found; set \$TERMINAL"
+	return 1
+}
+
+# After launching outside tmux: open a terminal window attached to the tickets session,
+# so the tickets show up without attaching by hand. The window is started detached
+# (setsid), so this returns right away and closing it never affects this shell or pi.
 # Prints why when it doesn't open one; the caller then prints the attach command.
 open_attach_window() {
 	[[ ${TICKETS_ATTACH:-1} != 0 ]] || { echo "no window: TICKETS_ATTACH=0"; return 1; }
 	[[ -z ${SSH_CONNECTION:-} ]] || { echo "no window: running over ssh"; return 1; }
 	[[ -n ${WAYLAND_DISPLAY:-}${DISPLAY:-} ]] || { echo "no window: no desktop session"; return 1; }
-	command -v ghostty >/dev/null || { echo "no window: ghostty not found"; return 1; }
-	local attached
+	local term name attached
+	term=$(pick_terminal) || { echo "$term"; return 1; }
+	name=${term##*/}
 	attached=$(tmux display-message -p -t "=$session:" '#{session_attached}' 2>/dev/null) || attached=0
 	if ((attached > 0)); then
 		echo "session $session is already open in a terminal"
 		return 0
 	fi
-	if ghostty +new-window -e tmux attach-session -t "=$session" >/dev/null 2>&1; then
-		echo "opened a Ghostty window attached to $session"
+	local attach=(tmux attach-session -t "=$session")
+	if [[ $name == ghostty ]]; then
+		# Asks the running Ghostty (over D-Bus) for one more window and returns right away, so
+		# its exit status says whether the window opened.
+		if "$term" +new-window -e "${attach[@]}" >/dev/null 2>&1; then
+			echo "opened ghostty attached to $session"
+			return 0
+		fi
+		echo "no window: ghostty +new-window failed"
+		return 1
+	fi
+	local argv
+	case $name in
+	kitty | foot) argv=("$term" "${attach[@]}") ;;
+	wezterm) argv=("$term" start -- "${attach[@]}") ;;
+	gnome-terminal | ptyxis | kgx) argv=("$term" -- "${attach[@]}") ;;
+	xfce4-terminal | terminator) argv=("$term" -x "${attach[@]}") ;;
+	# alacritty, konsole, xterm, urxvt, st and most others take -e.
+	*) argv=("$term" -e "${attach[@]}") ;;
+	esac
+	if ! command -v setsid >/dev/null; then
+		echo "no window: setsid not found"
+		return 1
+	fi
+	# Only the launch is checked: a terminal that exits right away (e.g. it does not take the
+	# flag above) is not noticed here; the session stays attachable by hand.
+	if setsid -f "${argv[@]}" </dev/null >/dev/null 2>&1; then
+		echo "opened $name attached to $session (if no window appears: tmux attach -t '$session')"
 		return 0
 	fi
-	echo "no window: ghostty +new-window failed"
+	echo "no window: could not start $name"
 	return 1
 }
 
