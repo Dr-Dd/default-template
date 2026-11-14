@@ -8,7 +8,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `worktree-setup.sh`: what a new `tickets.sh` worktree needs that git does not track (installed dependencies, `.env`, ...). It ships unconfigured, like `check.sh`, and `tickets.sh start` refuses to run until you configure it
 - `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
-- `models.sh`: show or switch the models the pi files use, by role (see [Models](#models))
+- `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses) and subagent settings that `AGENTS.md` and the prompts rely on
 - `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses, and the `oracle` advisor used by `/advised`
 - `tickets.sh`: run several tickets in parallel (see below)
@@ -76,7 +76,7 @@ This is a tripwire, not a sandbox. Deliberate dodges still work: clearing `BASH_
 
 ## Models
 
-Pi and its packages read the model from each file (`.pi/settings.json`, the prompts' and agents' `model:` frontmatter), so the IDs are written in nine places. `models.sh` keeps them in step by role:
+Pi and its packages read the model and thinking level from each file (`.pi/settings.json`'s `defaultProvider`/`defaultModel` and `defaultThinkingLevel`, the prompts' and agents' `model:` and `thinking:` frontmatter), so they are written in nine places. `models.sh` keeps them in step by role:
 
 | Role | Files |
 |---|---|
@@ -85,9 +85,14 @@ Pi and its packages read the model from each file (`.pi/settings.json`, the prom
 | `fast` | `scout` |
 
 ```sh
-./models.sh                                        # each role, its model and files; warns if a role is mixed
-./models.sh set strong claude-code/claude-opus-5-5 # switch every file of a role
+./models.sh                                             # each role, its files, their model and thinking; warns if a role mixes models
+./models.sh set strong claude-code/claude-opus-5-5      # switch the model of every file of a role; thinking untouched
+./models.sh set strong claude-code/claude-opus-5-5 high # same, and set every file of the role to thinking high
+./models.sh thinking standard low                       # set the thinking level of every file of a role
+./models.sh thinking .pi/prompts/discuss.md max         # or of one file
 ```
+
+Each change prints the file, the key and the values, e.g. `.pi/settings.json: defaultThinkingLevel: medium -> high`. Levels are pi's: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `models.sh` only checks the name; pi clamps a level the model does not support to the nearest supported one at runtime (non-reasoning models run `off`). Roles mix thinking levels on purpose (`/discuss` thinks harder than `/solo`), so `set` with a level overwrites that; leave the level off and use `thinking FILE LEVEL` to keep per-file levels.
 
 The files are guarded, so run it yourself rather than through the agent (or approve the changes when check-guard asks). Prompt and agent descriptions name roles (strong, standard, fast), not models, so they stay correct after a switch.
 

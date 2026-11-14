@@ -8,6 +8,13 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+### Added
+
+- `models.sh`: thinking levels. `list` shows each file's level, `set ROLE PROVIDER/MODEL LEVEL`
+  also sets the level of the role's files, and `thinking ROLE|FILE LEVEL` sets the level of a
+  role or of one file. Change lines now name the key changed (`model`, `thinking`,
+  `defaultProvider/defaultModel`, `defaultThinkingLevel`).
+
 ## v0.17.0 (2026-11-13)
 
 ### Changed
