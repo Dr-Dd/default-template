@@ -14,7 +14,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `.pi/agents/`: the `reviewer` subagent that `/review` runs
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
-- `.pi/prompts/`: the `/solo` (strong model) ticket command, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
+- `.pi/prompts/`: `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
 - `.pi/prompts/quick.md`: `/quick` (standard model) for small changes: no `SPEC.md` and no approval stop (it states a short plan instead). In a tickets file (`## ticket: <slug> quick`) it runs without stopping for approval
 - `.pi/prompts/review.md`: `/review`, see [Review](#review)
 
@@ -81,7 +81,7 @@ A failure can still be cut when a failing step prints more than 200 lines, its r
 
 Tickets are not reviewed by default. Instead, when the check passes, the agent writes a tests report: for each test case in the spec (or `/quick`'s plan) the test that covers it (file:line), its assertions copied verbatim and what it mocks, then the spec's test cases with no test and the tests the spec does not list. It reports facts, not an opinion of its own tests: an assertion that always holds (`assert status in (200, 302)`), a mock of the code under test or a missing test shows in the report itself. `check.sh` cannot catch these, because the tests pass. The report does not show special cases for tests in the code; the diff and a review do.
 
-To review, run `/review` after the ticket's summary, or ask for a review in the ticket text (e.g. in a tickets file). It prepares `.review/diff.patch` and runs the `reviewer` subagent (strong model, thinking `medium`, fresh context): up to 3 rounds for `/solo`, 1 for `/quick`, each round applying the P0/P1 findings and re-running the check. `/review` has no `model:` line, so it runs on the session's model; text after `/review` is passed to it as notes.
+To review, run `/review` after the ticket's summary, or ask for a review in the ticket text (e.g. in a tickets file). It prepares `.review/diff.patch` and runs the `reviewer` subagent (strong model, thinking `medium`, fresh context): up to 3 rounds for a normal ticket, 1 for `/quick`, each round applying the P0/P1 findings and re-running the check. `/review` has no `model:` line, so it runs on the session's model; text after `/review` is passed to it as notes.
 
 ## Running check.sh
 
@@ -94,11 +94,11 @@ This is a tripwire, not a sandbox. Deliberate dodges still work: clearing `BASH_
 
 ## Models
 
-Pi and its packages read the model and thinking level from each file (`.pi/settings.json`'s `defaultProvider`/`defaultModel` and `defaultThinkingLevel`, the prompts' and agents' `model:` and `thinking:` frontmatter), so they are written in seven places. `models.sh` keeps them in step by role:
+Pi and its packages read the model and thinking level from each file (`.pi/settings.json`'s `defaultProvider`/`defaultModel` and `defaultThinkingLevel`, the prompts' and agents' `model:` and `thinking:` frontmatter), so they are written in six places. `models.sh` keeps them in step by role:
 
 | Role | Files |
 |---|---|
-| `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/solo`, `/discuss`, `reviewer` |
+| `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/discuss`, `reviewer` |
 | `standard` | `/fanout`, `/quick` |
 | `fast` | none (kept for a cheap model; `./models.sh` shows `-- no files use this role --`) |
 
@@ -110,15 +110,15 @@ Pi and its packages read the model and thinking level from each file (`.pi/setti
 ./models.sh thinking .pi/prompts/discuss.md max         # or of one file
 ```
 
-Each change prints the file, the key and the values, e.g. `.pi/settings.json: defaultThinkingLevel: medium -> high`. Levels are pi's: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `models.sh` only checks the name; pi clamps a level the model does not support to the nearest supported one at runtime (non-reasoning models run `off`). Roles mix thinking levels on purpose (`/discuss` thinks harder than `/solo`), so `set` with a level overwrites that; leave the level off and use `thinking FILE LEVEL` to keep per-file levels.
+Each change prints the file, the key and the values, e.g. `.pi/settings.json: defaultThinkingLevel: medium -> high`. Levels are pi's: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. `models.sh` only checks the name; pi clamps a level the model does not support to the nearest supported one at runtime (non-reasoning models run `off`). Roles mix thinking levels on purpose (`/discuss` thinks harder than the `.pi/settings.json` default), so `set` with a level overwrites that; leave the level off and use `thinking FILE LEVEL` to keep per-file levels.
 
 The files are guarded, so run it yourself rather than through the agent (or approve the changes when check-guard asks). Prompt and agent descriptions name roles (strong, standard, fast), not models, so they stay correct after a switch.
 
 ## Parallel tickets
 
-A single ticket works as before: start `pi` in the repo and run `/solo` or `/quick`.
+A single ticket works as before: start `pi` in the repo and give it the ticket, or run `/quick`. A ticket without a prompt runs on the defaults in `.pi/settings.json` (strong model).
 
-To run several at once, write a tickets file with one `## ticket: <slug> [prompt]` line per ticket (prompt defaults to `solo`). Everything up to the next `## ticket:` line is the ticket, so ticket text can contain its own `##` headings:
+To run several at once, write a tickets file with one `## ticket: <slug> [prompt]` line per ticket (no prompt by default: the session gets the ticket as a plain message and follows `AGENTS.md`). Everything up to the next `## ticket:` line is the ticket, so ticket text can contain its own `##` headings:
 
 ```markdown
 ## ticket: fix-login
@@ -129,14 +129,14 @@ Add CSV export to the reports page.
 ```
 
 ```sh
-./tickets.sh start tickets.md     # --prompt quick, --base <ref> to change defaults
+./tickets.sh start tickets.md     # --prompt NAME, --base <ref>
 ./tickets.sh start --dry-run - < tickets.md   # read stdin; check everything, create nothing
 ./tickets.sh list                 # tickets: clean/dirty, tmux session open, commits since start, base
 ./tickets.sh merge <slug>         # merge into the current branch, run check.sh, then remove
 ./tickets.sh remove <slug>        # after you merged it: removes worktree and branch
 ```
 
-For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, runs `worktree-setup.sh` there, and launches pi with the ticket prompt. The worktrees are all created and set up before any session starts; if one fails (or you press Ctrl-C), the ones already created are removed again. `TICKETS_LAUNCHER` chooses how:
+For each ticket, `start` creates branch `ticket/<slug>` in a worktree at `../worktrees/<project>/<slug>` (override with `TICKETS_WORKTREE_DIR`), writes the ticket to `TICKET.md` there, runs `worktree-setup.sh` there, and launches pi with the ticket's prompt, if any. The worktrees are all created and set up before any session starts; if one fails (or you press Ctrl-C), the ones already created are removed again. `TICKETS_LAUNCHER` chooses how:
 
 - `tmux` (default): one tmux window per ticket. Inside tmux the windows go into your current session. Otherwise they go into a detached `<project>-tickets` session (characters other than letters, digits, `_` and `-` become `_`), and a new terminal window attached to it opens, so your current terminal and pi stay as they are. The terminal is `$TERMINAL` (a command name or path; arguments in it are ignored), else the first found of `ghostty kitty alacritty foot wezterm konsole gnome-terminal xterm`. Ghostty opens the window in the running instance (`ghostty +new-window`); others are started detached with the command flag they take (`-e` unless known otherwise). No window opens with `TICKETS_ATTACH=0`, over ssh, without a desktop session, without a terminal found, or when the session is already open in a terminal; `start` then prints the `tmux attach` command.
 - `print`: starts nothing and prints one `cd <worktree> && pi ...` command per ticket, to run yourself (e.g. one terminal tab each). Needs no multiplexer.

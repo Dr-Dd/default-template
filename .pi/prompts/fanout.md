@@ -7,7 +7,7 @@ restore: false
 Do not follow the workflow in AGENTS.md and do not edit files. Turn my request below into tickets for ./tickets.sh.
 
 - One ticket per separate change I asked for. Use my wording; do not add requirements, criteria or details I did not give. If the split is unclear, ask me instead of guessing.
-- Format: `## ticket: <slug> <mode>` then the ticket text. Slugs: lowercase letters, digits, `.`, `_`, `-`. Mode is the one I name for that ticket, otherwise `solo`.
+- Format: `## ticket: <slug> <mode>` then the ticket text. Slugs: lowercase letters, digits, `.`, `_`, `-`. Mode is the one I name for that ticket; if I name none, write `## ticket: <slug>` (the session then follows AGENTS.md without a prompt).
 - Always pass the list through a quoted heredoc so nothing is expanded:
 
   ./tickets.sh start [--dry-run] - <<'TICKETS_EOF'

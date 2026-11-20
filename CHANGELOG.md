@@ -8,6 +8,13 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+### Breaking
+
+- Removed `/solo`. A ticket is now a plain pi session that follows `AGENTS.md`, on the defaults in
+  `.pi/settings.json` (strong model, thinking `medium`; `/solo` used `low`). `tickets.sh start`
+  launches tickets with no prompt unless the ticket line or `--prompt` names one; tickets files
+  with `## ticket: <slug> solo` now fail (no such prompt). `models.sh` drops the file.
+
 ## v0.19.0 (2026-11-20)
 
 ### Breaking

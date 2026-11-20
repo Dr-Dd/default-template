@@ -11,7 +11,7 @@
 # model does not support to the nearest one it does at runtime (non-reasoning models run off).
 #
 # Roles:
-#   strong    .pi/settings.json (defaultProvider/defaultModel, defaultThinkingLevel), /solo, /discuss, reviewer
+#   strong    .pi/settings.json (defaultProvider/defaultModel, defaultThinkingLevel), /discuss, reviewer
 #   standard  /fanout, /quick
 #   fast      (no files; kept for a cheap model)
 #
@@ -32,7 +32,6 @@ levels=(off minimal low medium high xhigh max)
 # frontmatter `model:` and `thinking:` lines.
 files=(
 	strong:.pi/settings.json
-	strong:.pi/prompts/solo.md
 	strong:.pi/prompts/discuss.md
 	strong:.pi/agents/reviewer.md
 	standard:.pi/prompts/fanout.md

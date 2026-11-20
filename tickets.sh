@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run several tickets in parallel: one git worktree, branch and pi session per ticket.
 #
-#   ./tickets.sh start [--prompt solo|quick] [--base REF] [--dry-run] FILE|-
+#   ./tickets.sh start [--prompt NAME] [--base REF] [--dry-run] FILE|-
 #   ./tickets.sh list             (status, open tmux session, commits since the ticket started)
 #   ./tickets.sh merge SLUG       (merge --no-ff into the current branch, run check.sh, then remove)
 #   ./tickets.sh remove SLUG      (after you merged it: removes worktree and branch; refuses
@@ -20,7 +20,8 @@
 # For each ticket this creates branch ticket/<slug> from --base (default HEAD) in
 # $TICKETS_WORKTREE_DIR/<project>/<slug> (default: ../worktrees next to the repo),
 # writes the ticket to TICKET.md there (gitignored), runs worktree-setup.sh there (it must be
-# configured first, like check.sh), and launches `pi "/<prompt> ..."` in it. Each session is a
+# configured first, like check.sh), and launches `pi "/<prompt> ..."` in it (plain `pi "..."`
+# when the ticket names no prompt and --prompt is not given). Each session is a
 # normal interactive pi session that follows AGENTS.md: it stops for spec approval and never
 # merges.
 #
@@ -110,7 +111,7 @@ parse_tickets() {
 
 	local i j
 	for i in "${!slugs[@]}"; do
-		[[ -f "$main_root/.pi/prompts/${prompts[i]}.md" ]] ||
+		[[ -z ${prompts[i]} || -f "$main_root/.pi/prompts/${prompts[i]}.md" ]] ||
 			die "ticket '${slugs[i]}': no prompt .pi/prompts/${prompts[i]}.md"
 		for ((j = i + 1; j < ${#slugs[@]}; j++)); do
 			[[ ${slugs[i]} != "${slugs[j]}" ]] || die "duplicate slug '${slugs[i]}'"
@@ -143,10 +144,15 @@ session_env() {
 	printf 'env%s' "$out"
 }
 
+# How a ticket's prompt shows in messages: /<prompt>, or "no prompt".
+prompt_label() {
+	if [[ -n $1 ]]; then printf '/%s' "$1"; else printf 'no prompt'; fi
+}
+
 # The pi command for a ticket, to run inside its worktree.
 pi_command() {
 	local prompt=$1
-	local msg="/$prompt My ticket text is in TICKET.md at the repository root (I launched this session with tickets.sh). Read it first; it is the ticket."
+	local msg="${prompt:+/$prompt }My ticket text is in TICKET.md at the repository root (I launched this session with tickets.sh). Read it first; it is the ticket."
 	printf '%s --approve %s' "$(shell_quote "$pi_cmd")" "$(shell_quote "$msg")"
 }
 
@@ -316,7 +322,7 @@ rollback_created() {
 }
 
 cmd_start() {
-	local default_prompt=solo base=HEAD file="" dry_run=0
+	local default_prompt="" base=HEAD file="" dry_run=0
 	while (($#)); do
 		case $1 in
 		--prompt) default_prompt=${2:?--prompt needs a value}; shift 2 ;;
@@ -377,7 +383,7 @@ cmd_start() {
 
 	if ((dry_run)); then
 		for i in "${!slugs[@]}"; do
-			echo "would start ${slugs[i]} (/${prompts[i]}) on ticket/${slugs[i]} in $wt_root/${slugs[i]}"
+			echo "would start ${slugs[i]} ($(prompt_label "${prompts[i]}")) on ticket/${slugs[i]} in $wt_root/${slugs[i]}"
 		done
 		echo "dry run: all checks passed, nothing created (launcher: $launcher)"
 		return 0
@@ -412,10 +418,10 @@ cmd_start() {
 	for i in "${!slugs[@]}"; do
 		slug=${slugs[i]} dir="$wt_root/$slug"
 		if [[ $launcher == print ]]; then
-			echo "created $slug (/${prompts[i]}) on ticket/$slug in $dir; start it with:"
+			echo "created $slug ($(prompt_label "${prompts[i]}")) on ticket/$slug in $dir; start it with:"
 			launch "$slug" "$dir" "${prompts[i]}"
 		elif launch "$slug" "$dir" "${prompts[i]}"; then
-			echo "started $slug (/${prompts[i]}) on ticket/$slug in $dir"
+			echo "started $slug ($(prompt_label "${prompts[i]}")) on ticket/$slug in $dir"
 		else
 			echo "tickets: could not start a session for $slug (error above)" >&2
 			not_started+=("$i")
