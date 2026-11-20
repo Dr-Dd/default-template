@@ -6,7 +6,13 @@ pre-1.0: anything may change in any release, and breaking changes bump the minor
 The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The entries below
 `v0.15.0` keep the old numbering of the deleted tags and are history only.
 
+A project generated from a deleted tag fails `copier update` (`invalid reference`). Set
+`_commit:` in its `.copier-answers.yml` to that tag's commit, commit, then update. Known:
+`v11` is `12b1d63`.
+
 ## Unreleased
+
+## v0.20.0 (2026-11-20)
 
 ### Breaking
 
