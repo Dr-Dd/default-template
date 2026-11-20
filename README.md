@@ -8,6 +8,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `worktree-setup.sh`: what a new `tickets.sh` worktree needs that git does not track (installed dependencies, `.env`, ...). It ships unconfigured, like `check.sh`, and `tickets.sh start` refuses to run until you configure it
 - `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (see [The check tool's output](#the-check-tools-output); stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
+- `.pi/extensions/workflow-reminder/`: every 5 steps of a run (a step is a model response that called tools), appends the `## Agent workflow` section of `AGENTS.md` to the conversation as a hidden message, so the workflow keeps its weight in long tickets. It is appended after the step's tool results, so the prompt cache stays valid; it costs about 650 tokens per reminder. `PI_WORKFLOW_REMINDER_EVERY` sets the interval (`0` turns it off). Off in subagents, in `/discuss`, and when `AGENTS.md` has no `## Agent workflow` section. Based on "From Plan to Action" (ASE 2026), where re-inserting the plan every five steps raised success rates for all four models tested
 - `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses), filters that keep the tools of personal packages unused by the workflow (`pi-browser-harness`, `pi-web-access`, `pi-read`) out of the session, and subagent settings that `AGENTS.md` and the prompts rely on
 - `.pi/agents/`: the `reviewer` subagent that `/review` runs
@@ -35,13 +36,13 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 
 ```json
 {
-  "strictFiles": ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"],
+  "strictFiles": ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**", ".pi/extensions/workflow-reminder/**"],
   "guardedFiles": ["pytest.ini", "tests/**", "**/conftest.py"],
   "vulnerableFiles": [".pi/npm", ".pi/git"]
 }
 ```
 
-- `strictFiles` (default `["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"]`: the check, the worktree setup, the agent's own instructions and the pi files that define agents and prompts): globs relative to the project root. Always protected: changing, deleting or renaming an existing file needs your approval, and so does creating one. Setting it replaces the default, so keep those entries when you add your own. Globs match files: use `dir/**` for everything inside a directory.
+- `strictFiles` (default `["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**", ".pi/extensions/workflow-reminder/**"]`: the check, the worktree setup, the agent's own instructions, the pi files that define agents and prompts, and the workflow reminder): globs relative to the project root. Always protected: changing, deleting or renaming an existing file needs your approval, and so does creating one. Setting it replaces the default, so keep those entries when you add your own. Globs match files: use `dir/**` for everything inside a directory.
 - `guardedFiles` (default `[]`): globs like `strictFiles`, but for files that are protected only once committed in `HEAD`. A new file matched here does not need approval, so the agent can add new test files freely. Use it for tests, fixtures, snapshot files and test runner config. If a file matches both lists, `strictFiles` wins.
 - `vulnerableFiles` (default `[".pi/npm", ".pi/git"]`: pi's installed packages, which pi rewrites itself): globs that are not guarded at all, even if `strictFiles` or `guardedFiles` (or both) match them. A directory covers everything inside it. Use it to carve exceptions out of broad patterns like `.pi/**`. It cannot exempt `.pi/check-guard.json` or the extension.
 - `.pi/check-guard.json` and the extension itself are always strict.

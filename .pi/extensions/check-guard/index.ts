@@ -69,8 +69,8 @@ const KILL_GRACE_MS = 5000;
 const PIPE_GRACE_MS = 1000;
 /** Output kept from a check run (the tail). */
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-/** strictFiles when the config does not set them: the check, the worktree setup and the agent's own instructions. */
-const DEFAULT_STRICT: readonly string[] = ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**"];
+/** strictFiles when the config does not set them: the check, the worktree setup, the agent's own instructions and the workflow reminder. */
+const DEFAULT_STRICT: readonly string[] = ["check.sh", "worktree-setup.sh", "AGENTS.md", ".pi/settings.json", ".pi/agents/**", ".pi/prompts/**", ".pi/extensions/workflow-reminder/**"];
 /** vulnerableFiles when the config does not set them: pi's installed packages, which pi itself rewrites. */
 const DEFAULT_VULNERABLE: readonly string[] = [".pi/npm", ".pi/git"];
 /** Always guarded, and creating them also needs approval: the guard's own configuration and code. */

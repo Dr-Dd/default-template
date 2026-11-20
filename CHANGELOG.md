@@ -24,6 +24,14 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 - `/solo` thinking: `medium` -> `low`. If a ticket keeps failing the check, pi stops it; raise the
   level then (`./models.sh thinking .pi/prompts/solo.md medium`).
 
+### Added
+
+- `.pi/extensions/workflow-reminder/`: re-inserts the `## Agent workflow` section of `AGENTS.md`
+  as a hidden message every 5 steps of a run (`PI_WORKFLOW_REMINDER_EVERY`, `0` = off). Off in
+  subagents, `/discuss`, and repos without that section. Added to check-guard's default
+  `strictFiles`; projects that set `strictFiles` themselves already cover it with `.pi/**`, or
+  should add `.pi/extensions/workflow-reminder/**`.
+
 ### Changed
 
 - `AGENTS.md` Build step: tests first. The agent writes the tests listed in SPEC.md (or `/quick`'s
