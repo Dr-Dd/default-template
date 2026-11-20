@@ -34,6 +34,9 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ### Changed
 
+- `AGENTS.md` Plan step: for a bug, the first test case in SPEC.md reproduces the reported
+  symptom (the ticket's input or path and its wrong result), so the tests check the bug, not
+  only the agent's fix.
 - `AGENTS.md` Build step: tests first. The agent writes the tests listed in SPEC.md (or `/quick`'s
   plan) from the spec alone, before any new implementation code, then implements; after that it
   changes those tests only with your approval. Tests written after seeing the code tend to copy its
