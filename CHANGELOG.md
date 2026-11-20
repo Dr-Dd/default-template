@@ -8,8 +8,13 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+## v0.19.0 (2026-11-20)
+
 ### Breaking
 
+- Removed `/advised` and the `oracle` advisor agent. Use `/solo` (or `/quick` for small changes).
+  check-guard no longer allows launching `oracle`; `models.sh` drops both files. Tickets files
+  with `## ticket: <slug> advised` now fail `tickets.sh start` (no such prompt).
 - Review is opt-in. `/solo` and `/quick` no longer run the `reviewer` (`/quick` used to when a
   change touched tests, test or lint configuration, or suppression comments). Instead the agent
   writes a tests report when the check passes: each spec test case with its test (file:line),
@@ -50,12 +55,7 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
   sessions no longer send their tool definitions and prompt text with every request (58 tools
   down to 9). If one of them is not installed globally, pi installs it into the project to apply
   the filter.
-
-### Breaking
-
-- Removed `/advised` and the `oracle` advisor agent. Use `/solo` (or `/quick` for small changes).
-  check-guard no longer allows launching `oracle`; `models.sh` drops both files. Tickets files
-  with `## ticket: <slug> advised` now fail `tickets.sh start` (no such prompt).
+- `.gitignore`: ignores pi-subagents' runtime state.
 
 ## v0.18.0 (2026-11-14)
 
