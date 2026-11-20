@@ -3,6 +3,31 @@
 Planned work and follow-ups for the template itself. Kept out of the generated projects
 (`copier.yml` excludes this file).
 
+## Decided against
+
+- **Masking old tool outputs in the context** (a `context` extension that blanks tool results
+  older than N steps, as in JetBrains' "The Complexity Trap", which reports ~50% savings).
+  Estimated on 76 recorded pi-read sessions (41 tickets, 35 main checkout; 2026-11-13..15,
+  pre-v0.19 workflow): 96-97% of input was already served from the prompt cache. Masking changes
+  old messages, so the cache must be rewritten from that point (~1.25x input price) to save cache
+  reads (~0.1x). Net input cost: window 10/batch 10 -7.6%, 10/20 -3.3%, 20/20 -3.8%, 5/10 -8.2%
+  (negative = more expensive); only sessions of 60+ steps gained (+6-8%, 6 of 76). No session hit
+  compaction (max context 330K); files re-read more than 10 steps later: 6 times in 41 tickets.
+  Trimming output when it enters the context does not touch the cache: today's `check` trimming
+  would have saved ~11% on the same sessions; capping `bash` output at 4K/8K/16K chars ~4.5/1.9/0.5%
+  (not done: risks re-runs; revisit with logging). Revisit masking if tickets get much longer
+  (60+ steps typical), sessions start compacting, or the provider's cache pricing changes (on the
+  Claude subscription the quota cost of cache reads is unknown; if they count as full input, the
+  gross saving at window 10 is ~17%). Scripts: `analyze.mjs`, `econ.mjs`, `atentry.mjs` in
+  `/tmp/pi-test-context-masking-example/` (not kept).
+- **Hiding pi-subagents' `contact_supervisor` and `subagent_supervisor` in the parent session.**
+  They add ~800 chars (~200 tokens) to every request, under 1% of a ticket's input cost, and were
+  called 0 times in 83 pi-read main sessions (`subagent` 130, `bg_wait` 7; `bg_wait` is needed by
+  `/review`). No setting removes them (`defaultTools` `-name` has no effect, pi-subagents' config
+  is global-only); a project extension editing `systemPromptOptions.selectedTools` in
+  `before_agent_start` works (tested on claude-code and deepseek, `/review` unaffected) but
+  depends on when pi-subagents activates its tools. Not worth it.
+
 ## tickets.sh
 
 - **Run ticket sessions in an isolated environment.** Ticket sessions run `pi --approve` with
