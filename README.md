@@ -10,11 +10,12 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses), filters that keep the tools of personal packages unused by the workflow (`pi-browser-harness`, `pi-web-access`, `pi-read`) out of the session, and subagent settings that `AGENTS.md` and the prompts rely on
-- `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses
+- `.pi/agents/`: the `scout` subagent that `AGENTS.md` uses, and the `reviewer` that `/review` runs
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
 - `.pi/prompts/`: the `/solo` (strong model) ticket command, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
-- `.pi/prompts/quick.md`: `/quick` (standard model) for small changes: no `SPEC.md` and no approval stop (it states a short plan instead), and the review runs only if you ask for one. In a tickets file (`## ticket: <slug> quick`) it runs without stopping for approval
+- `.pi/prompts/quick.md`: `/quick` (standard model) for small changes: no `SPEC.md` and no approval stop (it states a short plan instead). In a tickets file (`## ticket: <slug> quick`) it runs without stopping for approval
+- `.pi/prompts/review.md`: `/review`, see [Review](#review)
 
 ## Usage
 
@@ -74,6 +75,12 @@ Every result stays in the agent's context for the rest of the session, so the `c
 - `verbose: true`: the whole output, passing steps included, as before (its last 2000 lines or 50 KB).
 
 A failure can still be cut when a failing step prints more than 200 lines, its runner does not print TAP, and it reports failures only inline, between passing tests, without repeating them at the end. For example, `go test -v ./...` prints each error under the test's `=== RUN` line, so in a long run the error falls in the omitted middle and the agent sees only `FAIL example.com/app`. It then has to run the whole check again with `verbose: true`. To avoid this, in `check.sh` use runner flags that print only failures, print them last, or print TAP: `go test ./...` without `-v` (prints only failures), pytest's default output (repeats failures in its closing summary), `node --test` and `bats` (TAP).
+
+## Review
+
+Tickets are not reviewed by default. Instead, when the check passes, the agent writes a tests report: for each test case in the spec (or `/quick`'s plan) the test that covers it (file:line), its assertions copied verbatim and what it mocks, then the spec's test cases with no test and the tests the spec does not list. It reports facts, not an opinion of its own tests: an assertion that always holds (`assert status in (200, 302)`), a mock of the code under test or a missing test shows in the report itself. `check.sh` cannot catch these, because the tests pass. The report does not show special cases for tests in the code; the diff and a review do.
+
+To review, run `/review` after the ticket's summary, or ask for a review in the ticket text (e.g. in a tickets file). It prepares `.review/diff.patch` and runs the `reviewer` subagent (strong model, thinking `medium`, fresh context): up to 3 rounds for `/solo`, 1 for `/quick`, each round applying the P0/P1 findings and re-running the check. `/review` has no `model:` line, so it runs on the session's model; text after `/review` is passed to it as notes.
 
 ## Running check.sh
 

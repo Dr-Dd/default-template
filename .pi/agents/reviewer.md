@@ -3,7 +3,7 @@ name: reviewer
 description: Fresh-context correctness reviewer. Checks a diff against SPEC.md; read-only.
 tools: read, grep, find, ls
 model: claude-code/claude-opus-5-5
-thinking: high
+thinking: medium
 defaultContext: fresh
 inheritProjectContext: false
 inheritSkills: false

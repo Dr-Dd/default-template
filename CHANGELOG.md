@@ -8,6 +8,15 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+### Breaking
+
+- Review is opt-in. `/solo` and `/quick` no longer run the `reviewer` (`/quick` used to when a
+  change touched tests, test or lint configuration, or suppression comments). Instead the agent
+  writes a tests report when the check passes: each spec test case with its test (file:line),
+  assertions verbatim and mocks, plus untested spec cases and unlisted tests. Run the new `/review`
+  prompt, or ask for a review in the ticket, to review.
+- `reviewer` thinking: `high` -> `medium`.
+
 ### Changed
 
 - The `check` tool returns only `Check passed (exit 0).` on success and only the failing steps

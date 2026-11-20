@@ -4,7 +4,7 @@ model: claude-code/claude-opus-5-5
 thinking: high
 restore: false
 ---
-This is a discussion, not a ticket. Do not follow the numbered workflow in AGENTS.md (Plan, Build, Review, Fix, Finish). In particular:
+This is a discussion, not a ticket. Do not follow the numbered workflow in AGENTS.md (Plan, Build, Tests report, Review, Finish). In particular:
 - do not check that the working tree is clean
 - do not run the check
 - do not run `reviewer`
