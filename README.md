@@ -10,7 +10,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses), filters that keep the tools of personal packages unused by the workflow (`pi-browser-harness`, `pi-web-access`, `pi-read`) out of the session, and subagent settings that `AGENTS.md` and the prompts rely on
-- `.pi/agents/`: the `scout` subagent that `AGENTS.md` uses, and the `reviewer` that `/review` runs
+- `.pi/agents/`: the `reviewer` subagent that `/review` runs
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
 - `.pi/prompts/`: the `/solo` (strong model) ticket command, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
@@ -59,7 +59,7 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 The `subagent` tool is allowlisted in the extension:
 
 - Actions that start no child run are allowed: `status`, `interrupt`, `stop`, `list`, `get`, `guide`. Every other action is blocked, including agent management (`create`, `update`, `delete`, ...), `resume`, schedules and workflow actions.
-- A call without an action is a direct launch. It may only start `scout` or `reviewer`, one agent per call: `workflow`, `tasks` and `chain` are blocked.
+- A call without an action is a direct launch. It may only start `reviewer`, one agent per call: `workflow`, `tasks` and `chain` are blocked.
 - A launch must be the only tool call of its message, and first runs the guarded-file check. If the check reverts changes, the launch is refused.
 
 The allowed actions and agents are constants at the top of `.pi/extensions/check-guard/index.ts` (`ALLOWED_SUBAGENT_ACTIONS`, `ALLOW_SUBAGENT_AGENTS`). To use other agents, add them there; the extension is always guarded, so this needs your approval.
@@ -99,7 +99,7 @@ Pi and its packages read the model and thinking level from each file (`.pi/setti
 |---|---|
 | `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/solo`, `/discuss`, `reviewer` |
 | `standard` | `/fanout`, `/quick` |
-| `fast` | `scout` |
+| `fast` | none (kept for a cheap model; `./models.sh` shows `-- no files use this role --`) |
 
 ```sh
 ./models.sh                                             # each role, its files, their model and thinking; warns if a role mixes models

@@ -16,6 +16,11 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
   assertions verbatim and mocks, plus untested spec cases and unlisted tests. Run the new `/review`
   prompt, or ask for a review in the ticket, to review.
 - `reviewer` thinking: `high` -> `medium`.
+- Removed the `scout` subagent and the lookup rules in `AGENTS.md` that went with it (use it for
+  multi-search lookups; treat its "unused or absent" claims as unverified). The main agent searches
+  with grep/find itself. check-guard now allows launching only `reviewer`; `/discuss` no longer
+  mentions the scout. The `fast` role in `models.sh` is kept with no files: `./models.sh` shows
+  `-- no files use this role --`, and `set`/`thinking` on it fail instead of changing nothing.
 - `/solo` thinking: `medium` -> `low`. If a ticket keeps failing the check, pi stops it; raise the
   level then (`./models.sh thinking .pi/prompts/solo.md medium`).
 

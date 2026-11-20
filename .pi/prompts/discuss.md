@@ -10,8 +10,6 @@ This is a discussion, not a ticket. Do not follow the numbered workflow in AGENT
 - do not run `reviewer`
 - do not regenerate .review/diff.patch or run `git add -N`
 
-The lookup rules in AGENTS.md still apply, so use `scout` for lookups that need several searches.
-
 Context: read SPEC.md and .review/diff.patch if they exist, and the code they touch when the question needs it. The patch may be older than the working tree. If that matters, check `git diff HEAD` and do not overwrite the patch.
 
 Do not edit files. If we reach a decision and I ask you to record it, update SPEC.md only.

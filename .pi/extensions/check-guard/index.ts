@@ -80,7 +80,7 @@ const ALWAYS_GUARDED: readonly string[] = [CONFIG_FILE, ".pi/extensions/check-gu
 const ALLOWED_SUBAGENT_ACTIONS = new Set(["status", "interrupt", "stop", "list", "get", "guide"]);
 
 // Agents the workflow uses for direct launches.
-const ALLOW_SUBAGENT_AGENTS = new Set(["scout", "reviewer"]);
+const ALLOW_SUBAGENT_AGENTS = new Set(["reviewer"]);
 // Fields that make a call launch other or several agents (scripts, parallel tasks, chains).
 const SUBAGENT_MULTI_LAUNCH_FIELDS: readonly string[] = ["workflow", "tasks", "chain"];
 

@@ -13,7 +13,7 @@
 # Roles:
 #   strong    .pi/settings.json (defaultProvider/defaultModel, defaultThinkingLevel), /solo, /discuss, reviewer
 #   standard  /fanout, /quick
-#   fast      scout
+#   fast      (no files; kept for a cheap model)
 #
 # Model IDs and thinking levels are written into each file (pi and its packages read them there);
 # this script keeps them in step. The files are guarded by check-guard: run it yourself, not through the agent.
@@ -37,7 +37,6 @@ files=(
 	strong:.pi/agents/reviewer.md
 	standard:.pi/prompts/fanout.md
 	standard:.pi/prompts/quick.md
-	fast:.pi/agents/scout.md
 )
 
 # The value of the first `KEY:` line inside the leading --- frontmatter block, or nothing.
@@ -142,6 +141,7 @@ cmd_list() {
 	local role entry file model thinking status=0
 	for role in "${roles[@]}"; do
 		echo "$role:"
+		[[ -n $(role_files "$role") ]] || echo "  -- no files use this role --"
 		for entry in "${files[@]}"; do
 			[[ ${entry%%:*} == "$role" ]] || continue
 			file=${entry#*:}
@@ -171,13 +171,21 @@ cmd_list() {
 	return "$status"
 }
 
+# The files of ROLE, one per line (nothing if it has none).
+role_files() {
+	local entry
+	for entry in "${files[@]}"; do
+		[[ ${entry%%:*} == "$1" ]] && echo "${entry#*:}"
+	done
+	return 0
+}
+
 # The managed files of TARGET (a role, or one managed file path), one per line.
 target_files() {
-	local target=${1#./} entry
+	local target=${1#./}
 	if valid_role "$target"; then
-		for entry in "${files[@]}"; do
-			[[ ${entry%%:*} == "$target" ]] && echo "${entry#*:}"
-		done
+		[[ -n $(role_files "$target") ]] || die "role '$target' has no files; nothing to change"
+		role_files "$target"
 		return 0
 	fi
 	for entry in "${files[@]}"; do
@@ -195,8 +203,10 @@ cmd_set() {
 	[[ $spec =~ $valid ]] ||
 		die "model must look like provider/model-id, e.g. claude-code/claude-opus-5-5"
 	[[ -z $level ]] || valid_level "$level"
-	local targets=()
-	mapfile -t targets < <(target_files "$role")
+	local list targets=()
+	# Not `< <(...)`: a die inside process substitution would not stop this shell.
+	list=$(target_files "$role") || exit 1
+	mapfile -t targets <<<"$list"
 	# Check every file before changing any.
 	for file in "${targets[@]}"; do
 		[[ -f $file ]] || die "$file not found"

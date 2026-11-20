@@ -2,8 +2,6 @@
 
 **Main agent only.** If you are a subagent, ignore this section and follow the task you were given.
 
-Lookups: For narrow searches ("where is X defined", "who calls Y") run one-shot grep/find yourself. Use the `scout` subagent when a lookup needs several searches or would return a lot of output. In its task, say what you are looking for and why you need it. Treat any claim that something is unused or absent as unverified until you check it yourself.
-
 You are the only agent that edits files in this repo. Subagents read and advise; they never write.
 
 1. Plan: If the working tree is not clean, or SPEC.md or .review/ exists, stop and tell me before planning. Run the `check` tool once before changing anything; if it fails, stop and tell me, with its output. Read the relevant code and write SPEC.md (what changes, files touched, test cases: one line per behaviour). Stop and wait for my approval.
