@@ -8,6 +8,14 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+### Changed
+
+- `.pi/settings.json` filters out the extensions and skills of the personal packages
+  `pi-browser-harness`, `pi-web-access` and `pi-read` (`autoload: false` deltas), so ticket
+  sessions no longer send their tool definitions and prompt text with every request (58 tools
+  down to 9). If one of them is not installed globally, pi installs it into the project to apply
+  the filter.
+
 ### Breaking
 
 - Removed `/advised` and the `oracle` advisor agent. Use `/solo` (or `/quick` for small changes).

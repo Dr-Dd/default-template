@@ -9,7 +9,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
-- `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses) and subagent settings that `AGENTS.md` and the prompts rely on
+- `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses), filters that keep the tools of personal packages unused by the workflow (`pi-browser-harness`, `pi-web-access`, `pi-read`) out of the session, and subagent settings that `AGENTS.md` and the prompts rely on
 - `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
