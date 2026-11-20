@@ -10,6 +10,10 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ### Changed
 
+- The `check` tool returns only `Check passed (exit 0).` on success and only the failing steps
+  on failure (passing TAP tests dropped; long steps cut to their first 60 and last 140 lines).
+  The new `verbose: true` parameter returns the whole output as before. Needs the `step()`
+  framing of the shipped `check.sh`; without it the whole output is returned.
 - `.pi/settings.json` filters out the extensions and skills of the personal packages
   `pi-browser-harness`, `pi-web-access` and `pi-read` (`autoload: false` deltas), so ticket
   sessions no longer send their tool definitions and prompt text with every request (58 tools

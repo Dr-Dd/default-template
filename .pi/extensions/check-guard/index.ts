@@ -28,6 +28,9 @@
  *     Changes reverted when the agent stops are reported to the model with the user's next message.
  *   The approval dialog shows the full diff (scrollable in the TUI; `c` toggles the whole file).
  *   PI_CHECK_DIFF_CONTEXT sets the context lines (default 4).
+ * - Output: a passing check returns only that it passed; a failing one returns only its failing
+ *   steps (head and tail of each, see summary.ts). `verbose: true` returns the whole output
+ *   (still truncated to its last lines).
  * - The check is stopped after `checkTimeoutSeconds` (.pi/check-guard.json, default 600; 0 turns
  *   the timeout off) and counts as a failure. Stopping kills check.sh's whole process group.
  * - Unknown keys in .pi/check-guard.json are reported to the user (and otherwise ignored).
@@ -50,6 +53,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { failingSteps } from "./summary.ts";
 
 /** The project check script run by the `check` tool. */
 const CHECK_FILE = "check.sh";
@@ -836,10 +840,16 @@ export default function (pi: ExtensionAPI) {
 		label: "Check",
 		description:
 			"Run the project check (./check.sh: tests, type checks, linters and whatever else the project configured). " +
-			"Fails with the output of every failing step.",
-		parameters: Type.Object({}),
+			"On success it returns only that the check passed; on failure, the output of the failing steps. " +
+			"Set verbose to get the full output.",
+		parameters: Type.Object({
+			verbose: Type.Optional(
+				Type.Boolean({ description: "Return the full output of every step, passing ones included. Default false." }),
+			),
+		}),
 		executionMode: "sequential",
-		async execute(_toolCallId, _params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			const verbose = params.verbose === true;
 			const { reverted, failed } = await gate(ctx);
 			if (reverted.length || failed.length) {
 				const notes: string[] = [];
@@ -857,16 +867,22 @@ export default function (pi: ExtensionAPI) {
 			const result = await runCheck(file, ctx.cwd, timeout, signal);
 			if (result.cancelled) return fail("Check cancelled.", { exitCode: result.code });
 
-			const t = truncateTail(result.output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
-			let out = t.truncated ? `[output truncated to the last ${t.outputLines} lines]\n${t.content}` : t.content;
+			const passed = result.code === 0 && !result.timedOut;
+			const full = () => {
+				const t = truncateTail(result.output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+				return t.truncated ? `[output truncated to the last ${t.outputLines} lines]\n${t.content}` : t.content;
+			};
 
-			if (result.code === 0 && !result.timedOut) {
+			if (passed) {
 				failures = 0;
 				return {
-					content: [{ type: "text", text: `${out}\n\nCheck passed (exit 0).` }],
+					content: [{ type: "text", text: verbose ? `${full()}\n\nCheck passed (exit 0).` : "Check passed (exit 0)." }],
 					details: { exitCode: 0, failures },
 				};
 			}
+
+			const steps = verbose ? undefined : failingSteps(result.output);
+			let out = steps === undefined ? full() : steps;
 
 			failures++;
 			const limit = maxFailures();

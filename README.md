@@ -6,7 +6,7 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `.gitignore`: common ignore rules
 - `check.sh`: the project check (tests, type checks, linters, ...) that must pass before a change is done. It ships unconfigured and fails until `guardedFiles` in `.pi/check-guard.json` is set (its `guarded-files` step, which needs `node`) and you replace its placeholder steps with the project's commands
 - `worktree-setup.sh`: what a new `tickets.sh` worktree needs that git does not track (installed dependencies, `.env`, ...). It ships unconfigured, like `check.sh`, and `tickets.sh start` refuses to run until you configure it
-- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
+- `.pi/extensions/check-guard/`: gives the agent a `check` tool that runs `check.sh` (see [The check tool's output](#the-check-tools-output); stopped after 10 minutes by default, see `checkTimeoutSeconds` below), stops the agent after 3 consecutive failing checks (set `PI_CHECK_MAX_FAILURES` to change the limit; your next message resets the count), blocks bash commands that run `check.sh` (see [Running check.sh](#running-checksh)), and requires your approval for changes to protected files (see [Protecting tests](#protecting-tests))
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses), filters that keep the tools of personal packages unused by the workflow (`pi-browser-harness`, `pi-web-access`, `pi-read`) out of the session, and subagent settings that `AGENTS.md` and the prompts rely on
@@ -64,6 +64,16 @@ The `subagent` tool is allowlisted in the extension:
 The allowed actions and agents are constants at the top of `.pi/extensions/check-guard/index.ts` (`ALLOWED_SUBAGENT_ACTIONS`, `ALLOW_SUBAGENT_AGENTS`). To use other agents, add them there; the extension is always guarded, so this needs your approval.
 
 Limits: the guard protects the text of existing files, not their behaviour. New files can still change how existing tests run, e.g. a new `conftest.py` that overrides a fixture, a monkeypatch in a new test file, or a special case in the code under test. A change made through bash is caught at the next check or at the end of the run, not right away. Review those.
+
+## The check tool's output
+
+Every result stays in the agent's context for the rest of the session, so the `check` tool returns little by default:
+
+- Passing: only `Check passed (exit 0).`
+- Failing: only the failing steps (and a step that never finished, e.g. on timeout), framed by the `==> NAME:` lines that `step()` in `check.sh` prints, plus the lines outside any step such as `check: FAILED (...)`. In TAP output (`node --test`, `bats` and other runners print TAP when not on a terminal) the passing tests are dropped, so failures are kept wherever they appear. A failing step still longer than 200 lines keeps its first 60 and last 140 lines (`STEP_HEAD_LINES`, `STEP_TAIL_LINES` in `.pi/extensions/check-guard/summary.ts`), with a marker saying how many were left out. A `check.sh` that does not use `step()` gets its whole output back.
+- `verbose: true`: the whole output, passing steps included, as before (its last 2000 lines or 50 KB).
+
+A failure can still be cut when a failing step prints more than 200 lines, its runner does not print TAP, and it reports failures only inline, between passing tests, without repeating them at the end. For example, `go test -v ./...` prints each error under the test's `=== RUN` line, so in a long run the error falls in the omitted middle and the agent sees only `FAIL example.com/app`. It then has to run the whole check again with `verbose: true`. To avoid this, in `check.sh` use runner flags that print only failures, print them last, or print TAP: `go test ./...` without `-v` (prints only failures), pytest's default output (repeats failures in its closing summary), `node --test` and `bats` (TAP).
 
 ## Running check.sh
 
