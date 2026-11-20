@@ -7,7 +7,7 @@ restore: false
 This is a discussion, not a ticket. Do not follow the numbered workflow in AGENTS.md (Plan, Build, Review, Fix, Finish). In particular:
 - do not check that the working tree is clean
 - do not run the check
-- do not run `reviewer` or consult `oracle`
+- do not run `reviewer`
 - do not regenerate .review/diff.patch or run `git add -N`
 
 The lookup rules in AGENTS.md still apply, so use `scout` for lookups that need several searches.

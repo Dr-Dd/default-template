@@ -10,10 +10,10 @@ A skeleton template, not a standalone project. It gives new or existing reposito
 - `.pi/check-guard.json`: which files are protected, and the check timeout. Not overwritten by `copier update`
 - `models.sh`: show or switch the models and thinking levels the pi files use, by role (see [Models](#models))
 - `.pi/settings.json`: default pi provider, model and thinking level, plus the packages (`pi-claude-code`, `pi-subagents`, `pi-prompt-template-model`, filtered to the skills and prompts the template uses) and subagent settings that `AGENTS.md` and the prompts rely on
-- `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses, and the `oracle` advisor used by `/advised`
+- `.pi/agents/`: the `scout` and `reviewer` subagents that `AGENTS.md` uses
 - `tickets.sh`: run several tickets in parallel (see below)
 - `.pi/prompts/fanout.md`: `/fanout`, which splits one request into parallel tickets and launches them with `tickets.sh`
-- `.pi/prompts/`: the `/solo` (strong model alone) and `/advised` (standard model with a strong-model `oracle` advisor) ticket commands, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
+- `.pi/prompts/`: the `/solo` (strong model) ticket command, plus `/discuss` for talking through choices (reads `SPEC.md` and `.review/diff.patch` but skips the build/test/review workflow)
 - `.pi/prompts/quick.md`: `/quick` (standard model) for small changes: no `SPEC.md` and no approval stop (it states a short plan instead), and the review runs only if you ask for one. In a tickets file (`## ticket: <slug> quick`) it runs without stopping for approval
 
 ## Usage
@@ -58,7 +58,7 @@ Pi only applies `.pi/settings.json` once you trust the project. Other settings s
 The `subagent` tool is allowlisted in the extension:
 
 - Actions that start no child run are allowed: `status`, `interrupt`, `stop`, `list`, `get`, `guide`. Every other action is blocked, including agent management (`create`, `update`, `delete`, ...), `resume`, schedules and workflow actions.
-- A call without an action is a direct launch. It may only start `scout`, `reviewer` or `oracle`, one agent per call: `workflow`, `tasks` and `chain` are blocked.
+- A call without an action is a direct launch. It may only start `scout` or `reviewer`, one agent per call: `workflow`, `tasks` and `chain` are blocked.
 - A launch must be the only tool call of its message, and first runs the guarded-file check. If the check reverts changes, the launch is refused.
 
 The allowed actions and agents are constants at the top of `.pi/extensions/check-guard/index.ts` (`ALLOWED_SUBAGENT_ACTIONS`, `ALLOW_SUBAGENT_AGENTS`). To use other agents, add them there; the extension is always guarded, so this needs your approval.
@@ -76,12 +76,12 @@ This is a tripwire, not a sandbox. Deliberate dodges still work: clearing `BASH_
 
 ## Models
 
-Pi and its packages read the model and thinking level from each file (`.pi/settings.json`'s `defaultProvider`/`defaultModel` and `defaultThinkingLevel`, the prompts' and agents' `model:` and `thinking:` frontmatter), so they are written in nine places. `models.sh` keeps them in step by role:
+Pi and its packages read the model and thinking level from each file (`.pi/settings.json`'s `defaultProvider`/`defaultModel` and `defaultThinkingLevel`, the prompts' and agents' `model:` and `thinking:` frontmatter), so they are written in seven places. `models.sh` keeps them in step by role:
 
 | Role | Files |
 |---|---|
-| `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/solo`, `/discuss`, `oracle`, `reviewer` |
-| `standard` | `/advised`, `/fanout`, `/quick` |
+| `strong` | `.pi/settings.json` (`defaultProvider`/`defaultModel`), `/solo`, `/discuss`, `reviewer` |
+| `standard` | `/fanout`, `/quick` |
 | `fast` | `scout` |
 
 ```sh
@@ -98,7 +98,7 @@ The files are guarded, so run it yourself rather than through the agent (or appr
 
 ## Parallel tickets
 
-A single ticket works as before: start `pi` in the repo and run `/solo` or `/advised`.
+A single ticket works as before: start `pi` in the repo and run `/solo` or `/quick`.
 
 To run several at once, write a tickets file with one `## ticket: <slug> [prompt]` line per ticket (prompt defaults to `solo`). Everything up to the next `## ticket:` line is the ticket, so ticket text can contain its own `##` headings:
 
@@ -106,12 +106,12 @@ To run several at once, write a tickets file with one `## ticket: <slug> [prompt
 ## ticket: fix-login
 Login fails when the email has uppercase letters.
 
-## ticket: csv-export advised
+## ticket: csv-export quick
 Add CSV export to the reports page.
 ```
 
 ```sh
-./tickets.sh start tickets.md     # --prompt advised, --base <ref> to change defaults
+./tickets.sh start tickets.md     # --prompt quick, --base <ref> to change defaults
 ./tickets.sh start --dry-run - < tickets.md   # read stdin; check everything, create nothing
 ./tickets.sh list                 # tickets: clean/dirty, tmux session open, commits since start, base
 ./tickets.sh merge <slug>         # merge into the current branch, run check.sh, then remove
@@ -136,7 +136,7 @@ npm ci --prefer-offline --no-audit
 
 Install dependencies from the lockfile (`npm ci`, `pnpm install --frozen-lockfile`, `uv sync --frozen`, ...) rather than symlinking or copying them from the main checkout. With a symlink, an install in one ticket would change every other ticket and the main checkout; package managers install quickly from their shared cache. Copy small untracked files such as `.env`. `copier update` does not overwrite the script, and changing it needs your approval in pi (it runs on your machine at every `start`).
 
-Or let pi write the list: in a pi session in the main checkout, run `/fanout <request>`, e.g. `/fanout fix the login bug (advised) and add CSV export`. It splits the request into tickets using your wording (no added requirements; each ticket agent details it in its own SPEC.md), checks the list with `--dry-run`, shows it to you and flags tickets that look like they change the same thing. It launches only after you approve, then stops.
+Or let pi write the list: in a pi session in the main checkout, run `/fanout <request>`, e.g. `/fanout fix the login bug (quick) and add CSV export`. It splits the request into tickets using your wording (no added requirements; each ticket agent details it in its own SPEC.md), checks the list with `--dry-run`, shows it to you and flags tickets that look like they change the same thing. It launches only after you approve, then stops.
 
 Notes:
 - Sessions start with `pi --approve` (project trust for that run only), since each worktree is a new directory.

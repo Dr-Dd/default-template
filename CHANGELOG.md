@@ -8,6 +8,12 @@ The tags `v1`...`v15.0.0` were deleted and numbering restarted at 0.15.0. The en
 
 ## Unreleased
 
+### Breaking
+
+- Removed `/advised` and the `oracle` advisor agent. Use `/solo` (or `/quick` for small changes).
+  check-guard no longer allows launching `oracle`; `models.sh` drops both files. Tickets files
+  with `## ticket: <slug> advised` now fail `tickets.sh start` (no such prompt).
+
 ## v0.18.0 (2026-11-14)
 
 ### Added

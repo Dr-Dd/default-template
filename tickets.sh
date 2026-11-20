@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run several tickets in parallel: one git worktree, branch and pi session per ticket.
 #
-#   ./tickets.sh start [--prompt solo|advised|quick] [--base REF] [--dry-run] FILE|-
+#   ./tickets.sh start [--prompt solo|quick] [--base REF] [--dry-run] FILE|-
 #   ./tickets.sh list             (status, open tmux session, commits since the ticket started)
 #   ./tickets.sh merge SLUG       (merge --no-ff into the current branch, run check.sh, then remove)
 #   ./tickets.sh remove SLUG      (after you merged it: removes worktree and branch; refuses
@@ -14,7 +14,7 @@
 #   ## ticket: fix-login
 #   Login fails when the email has uppercase letters. ...
 #
-#   ## ticket: csv-export advised
+#   ## ticket: csv-export quick
 #   Add CSV export to the reports page. ...
 #
 # For each ticket this creates branch ticket/<slug> from --base (default HEAD) in

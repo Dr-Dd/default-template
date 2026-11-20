@@ -11,8 +11,8 @@
 # model does not support to the nearest one it does at runtime (non-reasoning models run off).
 #
 # Roles:
-#   strong    .pi/settings.json (defaultProvider/defaultModel, defaultThinkingLevel), /solo, /discuss, oracle, reviewer
-#   standard  /advised, /fanout, /quick
+#   strong    .pi/settings.json (defaultProvider/defaultModel, defaultThinkingLevel), /solo, /discuss, reviewer
+#   standard  /fanout, /quick
 #   fast      scout
 #
 # Model IDs and thinking levels are written into each file (pi and its packages read them there);
@@ -34,9 +34,7 @@ files=(
 	strong:.pi/settings.json
 	strong:.pi/prompts/solo.md
 	strong:.pi/prompts/discuss.md
-	strong:.pi/agents/oracle.md
 	strong:.pi/agents/reviewer.md
-	standard:.pi/prompts/advised.md
 	standard:.pi/prompts/fanout.md
 	standard:.pi/prompts/quick.md
 	fast:.pi/agents/scout.md
